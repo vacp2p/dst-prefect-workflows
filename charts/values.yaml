@@ -1,0 +1,27 @@
+replicaCount:
+  bootstrap: 3
+  nodes: 3
+
+image:
+  repository: zorlin/waku
+  tag: debug-extra-nim-libp2p-logs-over-v0.31.0-with-extra-logs-mplex-perf
+  pullPolicy: IfNotPresent
+
+publisher:
+  enabled: true
+  image:
+    repository: zorlin/publisher
+    tag: v0.5.0
+  messageSize: 1
+  delaySeconds: 10
+  messageCount: 4000
+  startDelay:
+    enabled: false
+    minutes: 5
+  waitForStatefulSet:
+    enabled: true
+    stabilityMinutes: 0
+
+artificialLatency:
+  enabled: false
+  latencyMs: 50

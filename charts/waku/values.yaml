@@ -1,0 +1,55 @@
+# values.yaml
+global:
+  pubSubTopic: "/waku/2/rs/2/0"
+  # pubSubTopic: "/waku/2/default-waku/proto"
+
+replicaCount:
+  bootstrap: 3
+  nodes: 50
+
+image:
+  repository: wakuorg/nwaku
+  tag: v0.34.0
+  pullPolicy: IfNotPresent
+
+bootstrap:
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "768Mi"
+      cpu: "400m"
+
+nodes:
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "150m"
+    limits:
+      memory: "600Mi"
+      cpu: "500m"
+
+publisher:
+  enabled: true
+  image:
+    repository: soutullostatus/publisher
+    tag: v0.5.0
+  messageSize: 1
+  delaySeconds: 10
+  messageCount: 4000
+  startDelay:
+    enabled: false
+    minutes: 5
+  waitForStatefulSet:
+    enabled: true
+    stabilityMinutes: 1
+
+artificialLatency:
+  enabled: false
+  latencyMs: 50
+
+customCommand:
+  enabled: false
+  command: []
+  args: []

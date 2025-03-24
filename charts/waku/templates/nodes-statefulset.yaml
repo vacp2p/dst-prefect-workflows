@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-nodes
+spec:
+  replicas: {{ .Values.replicaCount.nodes }}
+  serviceName: {{ .Release.Name }}-service
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-nodes
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-nodes
+    spec:
+      initContainers:
+      {{- if .Values.artificialLatency.enabled }}
+        - name: tc-setup
+          image: alpine
+          securityContext:
+            privileged: true
+          command:
+            - sh
+            - -c
+            - |
+              apk add --no-cache iproute2
+              tc qdisc add dev eth0 root netem delay {{ .Values.artificialLatency.latencyMs }}ms
+      {{- end }}
+        - name: grabenr
+          image: soutullostatus/getenr:v0.5.0
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: enr-data
+              mountPath: /etc/enr
+          command:
+            - /app/getenr.sh
+          args:
+            - "3"
+            - "{{ .Release.Name }}-bootstrap"
+      containers:
+        - name: waku
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8645
+            - containerPort: 8008
+          resources:
+            {{- toYaml .Values.nodes.resources | nindent 12 }}
+          {{- if .Values.customCommand.enabled }}
+          command:
+            {{- toYaml .Values.customCommand.command | nindent 12 }}
+          args:
+            {{- toYaml .Values.customCommand.args | nindent 12 }}
+          {{- else }}
+          command:
+            - sh
+            - -c
+            - |
+              /usr/bin/wakunode --relay=true --max-connections=150 --rest=true --rest-admin=true --rest-private=true --rest-address=0.0.0.0 --discv5-discovery=true --discv5-enr-auto-update=True --log-level=INFO --metrics-server=True --metrics-server-address=0.0.0.0 --nat=extip:${IP} --cluster-id=2 --pubsub-topic="{{ .Values.global.pubSubTopic }}"
+          {{- end }}
+          env:
+            - name: IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP

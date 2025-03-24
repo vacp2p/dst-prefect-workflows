@@ -1,0 +1,26 @@
+{{- if .Values.publisher.waitForStatefulSet.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-publisher-statefulset-reader
+  namespace: {{ .Release.Namespace }}
+rules:
+- apiGroups: ["apps"]
+  resources: ["statefulsets", "statefulsets/status"]
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-publisher-statefulset-reader
+  namespace: {{ .Release.Namespace }}
+subjects:
+- kind: ServiceAccount
+  name: default
+roleRef:
+  kind: Role
+  name: {{ .Release.Name }}-publisher-statefulset-reader
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

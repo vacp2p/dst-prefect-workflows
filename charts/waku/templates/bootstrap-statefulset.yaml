@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-bootstrap
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicaCount.bootstrap }}
+  serviceName: {{ .Release.Name }}-bootstrap
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-bootstrap
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-bootstrap
+    spec:
+      containers:
+        - name: waku
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8545
+            - containerPort: 8008
+          resources:
+            {{- toYaml .Values.bootstrap.resources | nindent 12 }}
+          {{- if .Values.customCommand.enabled }}
+          command:
+            {{- toYaml .Values.customCommand.command | nindent 12 }}
+          args:
+            {{- toYaml .Values.customCommand.args | nindent 12 }}
+          {{- else }}
+          command:
+            - sh
+            - -c
+            - |
+              /usr/bin/wakunode --relay=false --rest=true --rest-address=0.0.0.0 --max-connections=500 --discv5-discovery=true --discv5-enr-auto-update=True --log-level=TRACE --metrics-server=True --metrics-server-address=0.0.0.0 --nat=extip:$IP --cluster-id=2 --pubsub-topic="{{ .Values.global.pubSubTopic }}"
+          {{- end }}
+          env:
+            - name: IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP

@@ -1,0 +1,1 @@
+helm upgrade --install dst-$(date +%Y%m%d-%H%M) ./waku --namespace zerotesting -f values.yaml

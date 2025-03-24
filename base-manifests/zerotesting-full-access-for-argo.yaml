@@ -1,0 +1,29 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: zerotesting-full-access
+  namespace: zerotesting
+rules:
+  - apiGroups: ["", "apps", "batch", "rbac.authorization.k8s.io"]
+    resources: ["pods", "pods/log", "services", "endpoints", "persistentvolumeclaims", "configmaps", "secrets", "statefulsets", "deployments", "jobs", "cronjobs", "roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/status"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: zerotesting-full-access-binding
+  namespace: zerotesting
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: argo
+roleRef:
+  kind: Role
+  name: zerotesting-full-access
+  apiGroup: rbac.authorization.k8s.io

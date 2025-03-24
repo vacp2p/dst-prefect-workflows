@@ -1,0 +1,53 @@
+{{- if .Values.publisher.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-publisher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-publisher
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-publisher
+    spec:
+      initContainers:
+        {{- if or .Values.publisher.startDelay.enabled .Values.publisher.waitForStatefulSet.enabled }}
+        - name: wait-for-conditions
+          image: bitnami/kubectl:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              {{- if .Values.publisher.startDelay.enabled }}
+              echo "Waiting for {{ .Values.publisher.startDelay.minutes }} minutes before starting..."
+              sleep {{ mul .Values.publisher.startDelay.minutes 60 }}
+              {{- end }}
+              
+              {{- if .Values.publisher.waitForStatefulSet.enabled }}
+              echo "Waiting for StatefulSet {{ .Release.Name }}-nodes to stabilize..."
+              kubectl rollout status statefulset/{{ .Release.Name }}-nodes -n {{ .Release.Namespace }} --timeout=1h
+              
+              echo "StatefulSet stable, waiting additional {{ .Values.publisher.waitForStatefulSet.stabilityMinutes }} minutes..."
+              sleep {{ mul .Values.publisher.waitForStatefulSet.stabilityMinutes 60 }}
+              {{- end }}
+              
+              echo "All conditions met, publisher can start."
+        {{- end }}
+      containers:
+        - name: publisher
+          image: "{{ .Values.publisher.image.repository }}:{{ .Values.publisher.image.tag }}"
+          command:
+            - python
+            - /app/traffic.py
+          args:
+            - --msg-size-kbytes={{ .Values.publisher.messageSize }}
+            - --delay-seconds={{ .Values.publisher.delaySeconds }}
+            - --messages={{ .Values.publisher.messageCount }}
+            - -p "{{ .Values.global.pubSubTopic }}"
+            - --serviceurl="{{ .Release.Name }}-nodes:8645"
+            - --debug
+{{- end }}
