@@ -55,6 +55,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+          volumeMounts:
+            - name: enr-data
+              mountPath: /etc/enr
           resources:
             {{- toYaml .Values.nodes.resources | nindent 12 }}
           command:

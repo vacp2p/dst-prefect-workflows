@@ -1,5 +1,5 @@
 apiVersion: v2
 name: waku
 description: A Helm chart for large scale Waku deployments
-version: 0.4.2
+version: 0.4.3
 appVersion: "1.0.0"
