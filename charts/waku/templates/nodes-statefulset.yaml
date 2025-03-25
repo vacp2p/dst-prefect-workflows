@@ -13,6 +13,12 @@ spec:
       labels:
         app: {{ .Release.Name }}-nodes
     spec:
+      dnsConfig:
+        searches:
+          - "{{ .Release.Name }}-bootstrap"
+      volumes:
+        - name: enr-data
+          emptyDir: {}
       initContainers:
       {{- if .Values.artificialLatency.enabled }}
         - name: tc-setup
