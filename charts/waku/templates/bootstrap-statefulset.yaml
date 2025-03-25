@@ -29,9 +29,10 @@ spec:
           resources:
             {{- toYaml .Values.bootstrap.resources | nindent 12 }}
           command:
-            {{- toYaml .Values.bootstrap.command | nindent 12 }}
+            - /bin/sh
+            - -c
           args:
-            {{- toYaml .Values.bootstrap.args | nindent 12 }}
+            {{- toYaml .Values.bootstrap.command | nindent 12 }}
           env:
             - name: IP
               valueFrom:

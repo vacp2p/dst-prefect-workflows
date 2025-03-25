@@ -58,9 +58,10 @@ spec:
           resources:
             {{- toYaml .Values.nodes.resources | nindent 12 }}
           command:
-            {{- toYaml .Values.nodes.command | nindent 12 }}
+            - /bin/sh
+            - -c
           args:
-            {{- toYaml .Values.nodes.args | nindent 12 }}
+            {{- toYaml .Values.nodes.command | nindent 12 }}
           env:
             - name: IP
               valueFrom:
