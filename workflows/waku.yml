@@ -8,7 +8,7 @@ spec:
   arguments:
     parameters:
       - name: repo_name
-        value: vacp2p/dst-argo-workflows
+        value: vacp2p/vaclab
       - name: github_token
         value: ""
   templates:
@@ -68,7 +68,7 @@ spec:
       metadata: {}
       script:
         name: ""
-        image: python:3.12.9-slim-bookworm
+        image: python:3.12.9-slim-bookworm  # Changed from python:3.9
         command:
           - bash
         resources: {}
@@ -93,15 +93,6 @@ spec:
           github_token = "{{inputs.parameters.github_token}}"
           repo_name = "{{inputs.parameters.repo_name}}"
 
-          # Check if GitHub token is set
-          if not github_token or github_token.strip() == "":
-              print("ERROR: GitHub token is not set or is empty")
-              print("Please provide a valid GitHub token when starting the workflow")
-              with open('/tmp/result.txt', 'w') as f:
-                  f.write("GITHUB_TOKEN_MISSING")
-              with open('/tmp/valid_issue.txt', 'w') as f:
-                  f.write("")
-              sys.exit(1)
 
           print(f"Checking issues for repository: {repo_name}")
 
@@ -111,14 +102,6 @@ spec:
 
           response = requests.get(url, headers=headers)
 
-          # Check if the token is valid
-          if response.status_code == 401:
-              print("ERROR: GitHub token is invalid or has insufficient permissions")
-              with open('/tmp/result.txt', 'w') as f:
-                  f.write("GITHUB_TOKEN_INVALID")
-              with open('/tmp/valid_issue.txt', 'w') as f:
-                  f.write("")
-              sys.exit(1)
 
           result = "NOT_VERIFIED"
           valid_issue = None
@@ -523,6 +506,8 @@ spec:
       inputs:
         parameters:
           - name: matrix_params
+          - name: parallelism
+            default: "0"
       dag:
         tasks:
           - name: deploy-config
@@ -531,227 +516,59 @@ spec:
               parameters:
                 - name: config
                   value: "{{item}}"
+                - name: sequential_mode
+                  value: "false"
             withParam: "{{inputs.parameters.matrix_params}}"
+            when: "{{inputs.parameters.parallelism}} == 0"
+            
+          - name: deploy-config-limited
+            template: deploy-matrix-item
+            arguments:
+              parameters:
+                - name: config
+                  value: "{{item}}"
+                - name: sequential_mode
+                  value: "false"
+            withParam: "{{inputs.parameters.matrix_params}}"
+            when: "{{inputs.parameters.parallelism}} > 0"
+            limitParallelism: "{{inputs.parameters.parallelism}}"
 
     - name: run-matrix-sequential
       inputs:
         parameters:
           - name: matrix_params
-      steps:
-        - - name: process-sequentially
-            template: process-sequential-executor
-            arguments:
-              parameters:
-                - name: matrix_params
-                  value: "{{inputs.parameters.matrix_params}}"
-                - name: index
-                  value: "0"
-    
-    - name: process-sequential-script
-      inputs:
-        parameters:
-          - name: matrix_params
-          - name: index
-      script:
-        image: python:3.12.9-slim-bookworm
-        command: [bash]
-        source: |
-          set -e
-          
-          echo "== DEBUG: Processing sequential script =="
-          echo "Matrix params: {{inputs.parameters.matrix_params}}"
-          echo "Current index: {{inputs.parameters.index}}"
-          
-          python << EOF
-          import json
-          import sys
-          
-          # Parse inputs
-          matrix_params_str = '''{{inputs.parameters.matrix_params}}'''
-          print(f"Raw matrix params: {matrix_params_str}")
-          
-          try:
-              matrix_params = json.loads(matrix_params_str)
-              print(f"Successfully parsed matrix params, found {len(matrix_params)} items")
-          except json.JSONDecodeError as e:
-              print(f"Error parsing matrix params: {e}")
-              print("Setting empty array as fallback")
-              matrix_params = []
-              
-          current_index = int('''{{inputs.parameters.index}}''')
-          
-          # Get total count
-          total_items = len(matrix_params)
-          
-          print(f"Processing item {current_index+1} of {total_items}")
-          
-          # Check if we need to continue (is there a next item?)
-          continue_workflow = current_index < total_items
-          
-          # Write the result - used by Argo conditional to determine whether to continue
-          with open('/tmp/continue.txt', 'w') as f:
-              f.write("true" if continue_workflow else "false")
-          
-          # Write the next index
-          with open('/tmp/next_index.txt', 'w') as f:
-              f.write(str(current_index + 1))
-          
-          # Write current item to use (or empty if beyond bounds)
-          if current_index < total_items:
-              current_item = matrix_params[current_index]
-              print(f"Current item at index {current_index}: {json.dumps(current_item)}")
-              with open('/tmp/current_item.txt', 'w') as f:
-                  # Pass the item directly without double-encoding
-                  f.write(json.dumps(current_item))
-          else:
-              print(f"Index {current_index} is out of bounds, no item to process")
-              with open('/tmp/current_item.txt', 'w') as f:
-                  f.write("")
-          
-          # Also write debug files
-          with open('/tmp/debug_current_item.txt', 'w') as f:
-              if current_index < total_items:
-                  f.write(json.dumps(current_item, indent=2))
-              else:
-                  f.write("No item to process")
-          
-          # Exit with success
-          sys.exit(0)
-          EOF
-          
-          echo "== DEBUG: Script results =="
-          echo "Continue: $(cat /tmp/continue.txt)"
-          echo "Next index: $(cat /tmp/next_index.txt)"
-          echo "Current item (first 100 chars): $(head -c 100 /tmp/current_item.txt)"
-      outputs:
-        parameters:
-          - name: continue
-            valueFrom:
-              path: /tmp/continue.txt
-          - name: next_index
-            valueFrom:
-              path: /tmp/next_index.txt
-          - name: current_item
-            valueFrom:
-              path: /tmp/current_item.txt
-              
-    - name: process-sequential-executor
-      inputs:
-        parameters:
-          - name: matrix_params
-          - name: index
-      steps:
-        - - name: get-item-info
-            template: process-sequential-script
-            arguments:
-              parameters:
-                - name: matrix_params
-                  value: "{{inputs.parameters.matrix_params}}"
-                - name: index
-                  value: "{{inputs.parameters.index}}"
-        - - name: deploy-current-item
-            template: deploy-matrix-item
-            when: "{{steps.get-item-info.outputs.parameters.continue}} == true"
-            arguments:
-              parameters:
-                - name: config
-                  value: "{{steps.get-item-info.outputs.parameters.current_item}}"
-        - - name: process-next-item
-            template: process-sequential-executor
-            when: "{{steps.get-item-info.outputs.parameters.continue}} == true"
-            arguments:
-              parameters:
-                - name: matrix_params
-                  value: "{{inputs.parameters.matrix_params}}"
-                - name: index
-                  value: "{{steps.get-item-info.outputs.parameters.next_index}}"
-
-    - name: extract-matrix-items
-      inputs:
-        parameters:
-          - name: matrix_params
-      script:
-        image: python:3.9-alpine
-        command: [python]
-        args:
-          - -c
-          - |
-            import json
-            import sys
-            
-            # Parse the matrix parameters
-            try:
-                matrix_params = json.loads('''{{inputs.parameters.matrix_params}}''')
-                # Return individual items as a list of strings, each a JSON representation of the item
-                # This avoids needing to use JsonPath expressions in the workflow
-                result = json.dumps([json.dumps(item) for item in matrix_params])
-                print(result)
-            except Exception as e:
-                print(f"Error processing matrix parameters: {e}", file=sys.stderr)
-                print("[]")
-      outputs:
-        result: stdout
-      
-    - name: get-array-length
-      inputs:
-        parameters:
-          - name: json_array
-      container:
-        image: python:3.9-alpine
-        command: [python]
-        args:
-          - -c
-          - |
-            import json
-            import sys
-            try:
-                data = json.loads('''{{inputs.parameters.json_array}}''')
-                print(len(data))
-            except Exception as e:
-                print(f"Error: {e}", file=sys.stderr)
-                print("0")
-      outputs:
-        parameters:
-          - name: result
-            valueFrom:
-              path: /dev/stdout
-
-    - name: process-with-index
-      inputs:
-        parameters:
-          - name: matrix_params
-          - name: index
-      steps:
-        - - name: deploy-item
+      dag:
+        tasks:
+          - name: deploy-config-sequential
             template: deploy-matrix-item
             arguments:
               parameters:
                 - name: config
-                  value: "{{jsonPath(inputs.parameters.matrix_params, '$[' + inputs.parameters.index + ']')}}"
+                  value: "{{item}}"
+                - name: sequential_mode
+                  value: "true"
+            withParam: "{{inputs.parameters.matrix_params}}"
 
     - name: deploy-matrix-item
       inputs:
         parameters:
           - name: config
+          - name: sequential_mode
+            default: "false"
+      synchronization:
+        mutex:
+          name: waku-sequential-deployment
+        when: "{{inputs.parameters.sequential_mode}} == true"
       script:
-        image: python:3.12.9-slim-bookworm
+        image: python:3.12-slim
         command: [bash]
         source: |
           set -e
           
-          echo "== DEBUG: Starting deploy-matrix-item =="
-          echo "Received config parameter: '{{inputs.parameters.config}}'"
-          
-          # Create debug file
-          mkdir -p /tmp/debug
-          echo "{{inputs.parameters.config}}" > /tmp/debug/raw_config.txt
-          
           # Install necessary packages
-          echo "Installing packages..."
           apt-get update && apt-get install -y curl wget bash
           
           # Install Python dependencies
-          echo "Installing Python dependencies..."
           pip install PyYAML
           
           python << EOF
@@ -759,79 +576,9 @@ spec:
           import yaml
           import subprocess
           import time
-          import math
-          import sys
-          import os
           
-          print("Starting Python script for deployment")
-          
-          # Ensure debug directory exists
-          os.makedirs("/tmp/debug", exist_ok=True)
-          
-          # Parse the config with better error handling
-          try:
-              config_str = '''{{inputs.parameters.config}}'''
-              print(f"Parsing config string (first 500 chars): {config_str[:500]}")
-              
-              # Write raw config for debugging
-              with open("/tmp/debug/config_raw.txt", "w") as f:
-                  f.write(config_str)
-                  
-              # Try to parse JSON
-              config = json.loads(config_str)
-              print("Successfully parsed config JSON")
-              
-              # Write parsed config for debugging
-              with open("/tmp/debug/config_parsed.json", "w") as f:
-                  json.dump(config, f, indent=2)
-                  
-          except json.JSONDecodeError as e:
-              print(f"Error parsing config JSON: {e}")
-              print(f"Raw config string: '{config_str}'")
-              
-              # Try to fix common JSON issues
-              print("Attempting to fix JSON...")
-              try:
-                  # Use a safer approach to fix JSON - avoid complex escape sequences
-                  print("Trying simple JSON fix approach")
-                  # Save the raw string to a file for inspection
-                  with open("/tmp/debug/raw_json_input.txt", "w") as f:
-                      f.write(config_str)
-                  
-                  # Create a simpler approach without escape character issues
-                  # First, let's try a direct parsing of the raw string
-                  try:
-                      import ast
-                      # Try to use the ast module to safely evaluate the string
-                      # This avoids issues with escaped characters
-                      print("Trying to repair JSON with ast.literal_eval")
-                      repaired_obj = ast.literal_eval(config_str)
-                      # Convert back to proper JSON
-                      fixed_str = json.dumps(repaired_obj)
-                      print("Successfully repaired JSON with ast.literal_eval")
-                  except:
-                      # If that fails, try manual fixes for common issues
-                      print("ast.literal_eval failed, trying manual fixes")
-                      # Manual replacement without escape character issues
-                      fixed_str = config_str
-                      # Use a regex replacement approach instead of direct string replacement
-                      import re
-                      fixed_str = re.sub(r'\\+"', '"', fixed_str)  # Fix escaped quotes
-                      print("Applied manual fixes to JSON string")
-                  
-                  # Save the fixed string for inspection
-                  with open("/tmp/debug/fixed_json_input.txt", "w") as f:
-                      f.write(fixed_str)
-                  
-                  # Try to parse the fixed JSON
-                  config = json.loads(fixed_str)
-                  print("Successfully parsed config JSON after fixing")
-                  
-                  with open("/tmp/debug/config_fixed.json", "w") as f:
-                      json.dump(config, f, indent=2)
-              except:
-                  print("Failed to fix JSON, exiting")
-                  sys.exit(1)
+          # Parse the config
+          config = json.loads('''{{inputs.parameters.config}}''')
           
           # Extract values with defensive coding
           index = config.get("index", "unknown")
@@ -849,14 +596,6 @@ spec:
           latency_ms = config.get("latency_ms", 50)
           custom_command = config.get("custom_command", False)
           custom_command_args = config.get("custom_command_args", [])
-          
-          # Print extracted values for debugging
-          print(f"Extracted values:")
-          print(f"- index: {index}")
-          print(f"- issue_number: {issue_number}")
-          print(f"- nodecount: {nodecount}")
-          print(f"- duration: {duration}")
-          print(f"- docker_image: {docker_image}")
           
           # Generate descriptive release name
           release_name = f"waku-{nodecount}x-{duration}m"
@@ -933,90 +672,32 @@ spec:
           # Write values.yaml
           with open('values.yaml', 'w') as f:
               yaml.dump(values, f)
-              
-          print("Values.yaml generated successfully")
-          with open('values.yaml', 'r') as f:
-              values_content = f.read()
-              print(f"Values.yaml content (first 500 chars): {values_content[:500]}")
-              # Also save to debug
-              with open('/tmp/debug/values.yaml', 'w') as debug_f:
-                  debug_f.write(values_content)
           
-          # Install Helm with error handling
-          print("Installing Helm...")
-          try:
-              # Download Helm script
-              print("Downloading Helm script...")
-              helm_install_cmd = ["curl", "-fsSL", "-o", "get_helm.sh", "https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3"]
-              helm_install_result = subprocess.run(helm_install_cmd, capture_output=True, text=True)
-              if helm_install_result.returncode != 0:
-                  print(f"Error downloading Helm script: {helm_install_result.stderr}")
-                  print(f"Stdout: {helm_install_result.stdout}")
-                  raise Exception("Helm download failed")
-              
-              # Set permissions
-              print("Setting permissions on Helm script...")
-              chmod_cmd = ["chmod", "700", "get_helm.sh"]
-              chmod_result = subprocess.run(chmod_cmd, capture_output=True, text=True)
-              if chmod_result.returncode != 0:
-                  print(f"Error setting permissions on Helm script: {chmod_result.stderr}")
-                  print(f"Stdout: {chmod_result.stdout}")
-                  raise Exception("Chmod failed")
-              
-              # Run Helm install
-              print("Running Helm install script...")
-              run_helm_install = ["./get_helm.sh"]
-              run_result = subprocess.run(run_helm_install, capture_output=True, text=True)
-              if run_result.returncode != 0:
-                  print(f"Error installing Helm: {run_result.stderr}")
-                  print(f"Stdout: {run_result.stdout}")
-                  raise Exception("Helm script failed")
-              
-              print("Helm installed successfully")
-          except Exception as e:
-              print(f"Error during Helm installation: {e}")
-              sys.exit(1)
-          
-          # Try simple helm command to verify it's working
-          print("Verifying Helm installation...")
-          try:
-              version_cmd = ["helm", "version"]
-              version_result = subprocess.run(version_cmd, capture_output=True, text=True)
-              print(f"Helm version: {version_result.stdout}")
-          except Exception as e:
-              print(f"Error checking Helm version: {e}")
+          # Install Helm
+          subprocess.run("curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3", shell=True)
+          subprocess.run("chmod 700 get_helm.sh", shell=True)
+          subprocess.run("./get_helm.sh", shell=True)
           
           # Deploy with Helm
-          print("Deploying with Helm...")
-          try:
-              helm_cmd = [
-                      "helm", "upgrade", "--install", release_name,
-                      "https://github.com/vacp2p/10ksim/raw/refs/heads/zorlin/helm10k/charts/waku-deployment-0.1.0.tgz",
-                      "-f", "values.yaml",
-                      "--namespace", "zerotesting"
-                  ]
-    
-              print(f"Running Helm command: {' '.join(helm_cmd)}")
-              deploy_result = subprocess.run(helm_cmd, capture_output=True, text=True)
+          helm_cmd = [
+                  "helm", "upgrade", "--install", release_name,
+                  "https://github.com/vacp2p/10ksim/raw/refs/heads/zorlin/helm10k/charts/waku-deployment-0.1.0.tgz",
+                  "-f", "values.yaml",
+                  "--namespace", "zerotesting"
+              ]
+
+          print(f"Running Helm command: {' '.join(helm_cmd)}")
+          deploy_result = subprocess.run(helm_cmd, capture_output=True, text=True)
               
-              # Save helm output for debugging
-              with open('/tmp/debug/helm_output.txt', 'w') as f:
-                  f.write(f"Return code: {deploy_result.returncode}\n")
-                  f.write(f"Stdout:\n{deploy_result.stdout}\n")
-                  f.write(f"Stderr:\n{deploy_result.stderr}\n")
-                  
-              if deploy_result.returncode != 0:
-                  print(f"Error deploying: {deploy_result.stderr}")
-                  print(f"Helm output: {deploy_result.stdout}")
-                  raise Exception("Helm deployment failed")
-              else:
-                  print(f"Deployment successful:")
-                  print(f"Helm output: {deploy_result.stdout}")
-          except Exception as e:
-              print(f"Error during deployment: {e}")
-              sys.exit(1)
+          if deploy_result.returncode != 0:
+              print(f"Error deploying: {deploy_result.stderr}")
+              print(f"Helm output: {deploy_result.stdout}")
+              exit(1)
+          else:
+              print(f"Deployment successful:")
+              print(f"Helm output: {deploy_result.stdout}")
           
-          # Wait for the test to complete
+          # Wait for specified duration
           duration_seconds = duration * 60
           print(f"Waiting for {duration} minutes ({duration_seconds} seconds)...")
           
@@ -1037,12 +718,6 @@ spec:
           print("Cleaning up deployment...")
           cleanup_cmd = ["helm", "uninstall", release_name, "--namespace", "zerotesting"]
           cleanup_result = subprocess.run(cleanup_cmd, capture_output=True, text=True)
-          
-          # Save cleanup output for debugging
-          with open('/tmp/debug/cleanup_output.txt', 'w') as f:
-              f.write(f"Return code: {cleanup_result.returncode}\n")
-              f.write(f"Stdout:\n{cleanup_result.stdout}\n")
-              f.write(f"Stderr:\n{cleanup_result.stderr}\n")
           
           if cleanup_result.returncode != 0:
               print(f"Warning: Error during cleanup: {cleanup_result.stderr}")
