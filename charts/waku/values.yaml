@@ -12,6 +12,8 @@ image:
   pullPolicy: IfNotPresent
 
 bootstrap:
+  command: []
+  args: []
   resources:
     requests:
       memory: "64Mi"
@@ -21,6 +23,8 @@ bootstrap:
       cpu: "400m"
 
 nodes:
+  command: []
+  args: []
   resources:
     requests:
       memory: "64Mi"
@@ -48,7 +52,3 @@ artificialLatency:
   enabled: false
   latencyMs: 50
 
-customCommand:
-  enabled: false
-  command: []
-  args: []
