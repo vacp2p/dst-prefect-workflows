@@ -23,11 +23,11 @@ spec:
             - containerPort: 8008
           resources:
             {{- toYaml .Values.bootstrap.resources | nindent 12 }}
-          {{- if .Values.customCommand.enabled }}
+          {{- if .Values.customBootstrapCommand.enabled }}
           command:
-            {{- toYaml .Values.customCommand.command | nindent 12 }}
+            {{- toYaml .Values.customBootstrapCommand.command | nindent 12 }}
           args:
-            {{- toYaml .Values.customCommand.args | nindent 12 }}
+            {{- toYaml .Values.customBootstrapCommand.args | nindent 12 }}
           {{- else }}
           command:
             - sh

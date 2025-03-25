@@ -1,7 +1,6 @@
 # values.yaml
 global:
   pubSubTopic: "/waku/2/rs/2/0"
-  # pubSubTopic: "/waku/2/default-waku/proto"
 
 replicaCount:
   bootstrap: 3

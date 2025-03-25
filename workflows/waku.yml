@@ -40,14 +40,6 @@ spec:
                   value: "{{steps.handle-verification-result.outputs.parameters.valid_issue}}"
         - - name: run-matrix-parallel
             template: run-matrix-parallel
-            when: "{{steps.execute-deployment-if-verified.outputs.parameters.should_run_parallel}} == true"
-            arguments:
-              parameters:
-                - name: matrix_params
-                  value: "{{steps.execute-deployment-if-verified.outputs.parameters.matrix_params}}"
-        - - name: run-matrix-sequential
-            template: run-matrix-sequential
-            when: "{{steps.execute-deployment-if-verified.outputs.parameters.should_run_sequential}} == true"
             arguments:
               parameters:
                 - name: matrix_params
@@ -163,7 +155,6 @@ spec:
               valid_issue_encoded = ""
 
           # Write outputs to separate files
-
           with open('/tmp/result.txt', 'w') as f:
               f.write(result)
           with open('/tmp/valid_issue.txt', 'w') as f:
@@ -280,18 +271,9 @@ spec:
           - name: matrix_params
             valueFrom:
               parameter: "{{steps.generate-matrix.outputs.parameters.matrix_params}}"
-          - name: execution_mode
-            valueFrom:
-              parameter: "{{steps.generate-matrix.outputs.parameters.execution_mode}}"
           - name: has_matrix
             valueFrom:
               parameter: "{{steps.generate-matrix.outputs.parameters.has_matrix}}"
-          - name: should_run_parallel
-            valueFrom:
-              parameter: "{{steps.generate-matrix.outputs.parameters.should_run_parallel}}"
-          - name: should_run_sequential
-            valueFrom:
-              parameter: "{{steps.generate-matrix.outputs.parameters.should_run_sequential}}"
       steps:
         - - name: generate-matrix
             template: generate-matrix
@@ -310,36 +292,27 @@ spec:
           - name: matrix_params
             valueFrom:
               path: /tmp/matrix_params.txt
-          - name: execution_mode
-            valueFrom:
-              path: /tmp/execution_mode.txt
           - name: has_matrix
             valueFrom:
               path: /tmp/has_matrix.txt
-          - name: should_run_parallel
-            valueFrom:
-              path: /tmp/should_run_parallel.txt
-          - name: should_run_sequential
-            valueFrom:
-              path: /tmp/should_run_sequential.txt
       script:
         image: python:3.12.9-slim-bookworm
         command: [bash]
         source: |
           set -e
+          
+          # Install necessary packages
+          pip3 install --break-system-packages kubernetes
 
           # Create output files
           touch /tmp/matrix_params.txt
-          touch /tmp/execution_mode.txt
           touch /tmp/has_matrix.txt
-          touch /tmp/should_run_parallel.txt
-          touch /tmp/should_run_sequential.txt
-          
-          python << EOF
+          python3 << EOF
           import json
           import base64
           import itertools
           import traceback
+          import kubernetes
 
           def sanitize_json(input_json):
               try:
@@ -398,7 +371,7 @@ spec:
                   'num_nodes': parse_int_list(data.get("Number of nodes"), 50),
                   'num_bootstrap': safe_int(data.get("Bootstrap nodes"), 3),
                   'duration': parse_int_list(data.get("Duration"), 0),
-                  'execution_mode': data.get("Execution Mode", "Sequential").lower(),
+                  'parallelism': safe_int(data.get("Parallelism"), 0),
                   'publisher_enabled': data.get("Enable Publisher", "").lower() == "yes",
                   'pubsub_topic': data.get("PubSub Topic", ""),
                   'publisher_message_size': safe_int(data.get("Publisher Message Size"), 1),
@@ -424,9 +397,7 @@ spec:
                       f.write("sequential")
                   with open('/tmp/has_matrix.txt', 'w') as f:
                       f.write("false")
-                  with open('/tmp/should_run_parallel.txt', 'w') as f:
-                      f.write("false")
-                  with open('/tmp/should_run_sequential.txt', 'w') as f:
+                  with open('/tmp/has_matrix.txt', 'w') as f:
                       f.write("false")
                   exit(1)
               
@@ -434,14 +405,14 @@ spec:
               parsed_data = parse_github_issue(issue_data)
               issue_number = parsed_data['issue_number']
               
-              # Get node counts and durations
+              # Get node counts, durations, and parallelism
               nodecounts = parsed_data['num_nodes']
               durations = parsed_data['duration']
-              execution_mode = parsed_data['execution_mode']
+              parallelism = parsed_data['parallelism']
               
               print(f"Node counts: {nodecounts}")
               print(f"Durations: {durations}")
-              print(f"Execution mode: {execution_mode}")
+              print(f"Parallelism: {parallelism}")
               
               # Create matrix of all combinations
               matrix_items = []
@@ -464,25 +435,23 @@ spec:
                       "custom_command": parsed_data['custom_command'],
                       "custom_command_args": parsed_data['custom_command_args']
                   })
-              
+
+              # Set parallelism at a namespace level using Kubernetes python module
+              kubernetes.config.load_incluster_config()
+              v1 = kubernetes.client.CoreV1Api()
+              namespace = "zerotesting"
+              parallelism_limit = parsed_data['parallelism']
+              metadata = kubernetes.client.V1ObjectMeta(
+                  annotations={"workflows.argoproj.io/parallelism-limit": str(parallelism_limit)}
+              )
+              v1.patch_namespaced_namespace(namespace, metadata)
+  
               # Write outputs
               with open('/tmp/matrix_params.txt', 'w') as f:
                   f.write(json.dumps(matrix_items))
-              with open('/tmp/execution_mode.txt', 'w') as f:
-                  f.write(execution_mode)
-              
               has_matrix = len(matrix_items) > 0
               with open('/tmp/has_matrix.txt', 'w') as f:
                   f.write("true" if has_matrix else "false")
-              
-              # Create combined condition outputs for direct use in when expressions
-              should_run_parallel = has_matrix and execution_mode == "parallel"
-              should_run_sequential = has_matrix and execution_mode != "parallel"
-              
-              with open('/tmp/should_run_parallel.txt', 'w') as f:
-                  f.write("true" if should_run_parallel else "false")
-              with open('/tmp/should_run_sequential.txt', 'w') as f:
-                  f.write("true" if should_run_sequential else "false")
               
               print(f"Generated matrix with {len(matrix_items)} configurations")
               
@@ -491,13 +460,7 @@ spec:
               print(traceback.format_exc())  # Print full traceback for debugging
               with open('/tmp/matrix_params.txt', 'w') as f:
                   f.write("[]")
-              with open('/tmp/execution_mode.txt', 'w') as f:
-                  f.write("sequential")
               with open('/tmp/has_matrix.txt', 'w') as f:
-                  f.write("false")
-              with open('/tmp/should_run_parallel.txt', 'w') as f:
-                  f.write("false")
-              with open('/tmp/should_run_sequential.txt', 'w') as f:
                   f.write("false")
               exit(1)
           EOF
@@ -506,59 +469,19 @@ spec:
       inputs:
         parameters:
           - name: matrix_params
-          - name: parallelism
-            default: "0"
-      dag:
-        tasks:
-          - name: deploy-config
+      steps:
+        - - name: deploy-config
             template: deploy-matrix-item
             arguments:
               parameters:
                 - name: config
                   value: "{{item}}"
-                - name: sequential_mode
-                  value: "false"
-            withParam: "{{inputs.parameters.matrix_params}}"
-            when: "{{inputs.parameters.parallelism}} == 0"
-            
-          - name: deploy-config-limited
-            template: deploy-matrix-item
-            arguments:
-              parameters:
-                - name: config
-                  value: "{{item}}"
-                - name: sequential_mode
-                  value: "false"
-            withParam: "{{inputs.parameters.matrix_params}}"
-            when: "{{inputs.parameters.parallelism}} > 0"
-            limitParallelism: "{{inputs.parameters.parallelism}}"
-
-    - name: run-matrix-sequential
-      inputs:
-        parameters:
-          - name: matrix_params
-      dag:
-        tasks:
-          - name: deploy-config-sequential
-            template: deploy-matrix-item
-            arguments:
-              parameters:
-                - name: config
-                  value: "{{item}}"
-                - name: sequential_mode
-                  value: "true"
             withParam: "{{inputs.parameters.matrix_params}}"
 
     - name: deploy-matrix-item
       inputs:
         parameters:
           - name: config
-          - name: sequential_mode
-            default: "false"
-      synchronization:
-        mutex:
-          name: waku-sequential-deployment
-        when: "{{inputs.parameters.sequential_mode}} == true"
       script:
         image: python:3.12-slim
         command: [bash]
