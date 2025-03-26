@@ -1,0 +1,58 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-pod
+  namespace: zerotesting-nimlibp2p
+spec:
+  replicas: 1000
+  podManagementPolicy: "Parallel"
+  serviceName: {{ .Release.Name }}-service
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+    spec:
+      dnsConfig:
+        searches:
+          - {{ .Release.Name }}-service.zerotesting-nimlibp2p.svc.cluster.local
+      initContainers:
+        - name: slowyourroll
+          image: soutullostatus/tc-container:1
+          securityContext:
+            capabilities:
+              add: [ "NET_ADMIN" ]
+          command:
+            - sh
+            - -c
+            - tc qdisc add dev eth0 root netem delay 100ms 30ms distribution normal
+      containers:
+        - name: container-0
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5000
+            - containerPort: 8008
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "150m"
+            limits:
+              memory: "600Mi"
+              cpu: "400m"
+          env:
+            - name: PEERNUMBER
+              value: "{{ .Values.peerNumber }}"
+            - name: PEERS
+              value: "{{ .Values.peers }}"
+            - name: CONNECTTO
+              value: "{{ .Values.connectTo }}"
+            - name: MSGRATE
+              value: "{{ .Values.msgRate }}"
+            - name: MSGSIZE
+              value: "100"
+          args:
+            - "{{ .Values.args }}"

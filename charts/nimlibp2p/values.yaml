@@ -1,0 +1,11 @@
+# values.yaml
+image:
+  repository: soutullostatus/dst-test-node
+  tag: v1.8.0-mplex
+
+peerNumber: 0
+peers: 1000
+connectTo: 10
+msgRate: 1000
+msgSize: 100
+args: "30 17"

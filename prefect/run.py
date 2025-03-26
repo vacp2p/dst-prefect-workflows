@@ -15,22 +15,41 @@ def find_valid_issue(repo_name: str, github_token: str):
     response = requests.get(url, headers=headers)
 
     if response.status_code != 200:
+        print(f"Failed to fetch issues. Status code: {response.status_code}")
         return "NOT_VERIFIED", None
 
     issues = response.json()
+    print(f"Found {len(issues)} issues")
+    
     for issue in issues:
-        if "simulation-done" in [l['name'] for l in issue.get('labels', [])]:
+        print(f"Checking issue #{issue['number']}")
+        labels = [l['name'] for l in issue.get('labels', [])]
+        print(f"Issue labels: {labels}")
+        
+        # Skip if already done
+        if "simulation-done" in labels:
+            print(f"Issue #{issue['number']} already marked as done")
             continue
-        if "needs-scheduling" not in [l['name'] for l in issue.get('labels', [])]:
+            
+        # Check if needs scheduling
+        if "needs-scheduling" not in labels:
+            print(f"Issue #{issue['number']} doesn't need scheduling")
             continue
 
         events_url = f"https://api.github.com/repos/{repo_name}/issues/{issue['number']}/events"
         events = requests.get(events_url, headers=headers).json()
+        print(f"Found {len(events)} events for issue #{issue['number']}")
+        
         for e in reversed(events):
             if e['event'] == 'labeled' and e['label']['name'] == 'needs-scheduling':
-                if e['actor']['login'].lower() in [u.lower() for u in AUTHORIZED_USERS]:
+                actor = e['actor']['login'].lower()
+                print(f"Found needs-scheduling label added by {actor}")
+                if actor in [u.lower() for u in AUTHORIZED_USERS]:
+                    print(f"Authorized user {actor} added the label")
                     encoded = base64.b64encode(json.dumps(issue).encode()).decode()
                     return "VERIFIED", encoded
+                else:
+                    print(f"User {actor} is not authorized")
     return "NOT_VERIFIED", None
 
 @task
@@ -77,64 +96,100 @@ def parse_and_generate_matrix(valid_issue_encoded: str):
             return default
         return val.lower() == "yes"
 
-    # Parse all the configuration parameters using our utility functions
-    nodes = parse_list(get_valid_value("Number of nodes", "50"))
-    durations = parse_list(get_valid_value("Duration", "5"))
+    # Get the program being tested
+    program = get_valid_value("What program does this test concern?", "").lower()
+    if program not in ["waku", "nimlibp2p"]:
+        print(f"Unknown program: {program}. Defaulting to waku.")
+        program = "waku"
+
+    # Common parameters for both charts
     parallel_runs = parse_list(get_valid_value("Parallelism", "1"))
     parallel_limit = parallel_runs[0] if parallel_runs else 1
-    
-    bootstrap_nodes = safe_int(get_valid_value("Bootstrap nodes"), 3)
-    
-    # Handle pubsub topic with validation
-    raw_pubsub_topic = get_valid_value("PubSub Topic")
-    if not raw_pubsub_topic or not raw_pubsub_topic.startswith("/waku/2/rs"):
-        pubsub_topic = "/waku/2/rs/2/0"  # Default topic that is properly formatted
-        print(f"Using default pubsub topic '{pubsub_topic}' because the provided value was invalid or missing")
-    else:
-        pubsub_topic = raw_pubsub_topic
-        print(f"Using provided pubsub topic: {pubsub_topic}")
-    
-    publisher_enabled = safe_bool(get_valid_value("Enable Publisher"))
-    publisher_message_size = safe_int(get_valid_value("Publisher Message Size"), 1)
-    publisher_delay = safe_int(get_valid_value("Publisher Delay"), 10)
-    publisher_message_count = safe_int(get_valid_value("Publisher Message Count"), 1000)
-    
-    artificial_latency = safe_bool(get_valid_value("Enable Artificial Latency"))
-    latency_ms = safe_int(get_valid_value("Artificial Latency (ms)"), 50)
-    
-    nodes_command = get_valid_value("Nodes Command")
-    bootstrap_command = get_valid_value("Bootstrap Command")
-
-    image = get_valid_value("Docker image", "statusteam/nim-waku:latest")
+    docker_image = get_valid_value("Docker image", "statusteam/nim-waku:latest")
 
     matrix = []
     i = 0
-    for n in nodes:
-        for d in durations:
-            matrix.append({
-                "index": i,
-                "issue_number": issue_number,
-                "nodecount": n,
-                "duration": d,
-                "bootstrap_nodes": bootstrap_nodes,
-                "docker_image": image,
-                "pubsub_topic": pubsub_topic,
-                "publisher_enabled": publisher_enabled,
-                "publisher_message_size": publisher_message_size,
-                "publisher_delay": publisher_delay,
-                "publisher_message_count": publisher_message_count,
-                "artificial_latency": artificial_latency,
-                "latency_ms": latency_ms,
-                "nodes_command": nodes_command,
-                "bootstrap_command": bootstrap_command,
-                "parallel_limit": parallel_limit
-            })
-            i += 1
+
+    if program == "waku":
+        # Waku-specific parameters
+        nodes = parse_list(get_valid_value("Number of nodes", "50"))
+        durations = parse_list(get_valid_value("Duration", "5"))
+        bootstrap_nodes = safe_int(get_valid_value("Bootstrap nodes"), 3)
+        
+        # Handle pubsub topic with validation
+        raw_pubsub_topic = get_valid_value("PubSub Topic")
+        if not raw_pubsub_topic or not raw_pubsub_topic.startswith("/waku/2/rs"):
+            pubsub_topic = "/waku/2/rs/2/0"  # Default topic that is properly formatted
+            print(f"Using default pubsub topic '{pubsub_topic}' because the provided value was invalid or missing")
+        else:
+            pubsub_topic = raw_pubsub_topic
+            print(f"Using provided pubsub topic: {pubsub_topic}")
+        
+        publisher_enabled = safe_bool(get_valid_value("Enable Publisher"))
+        publisher_message_size = safe_int(get_valid_value("Publisher Message Size"), 1)
+        publisher_delay = safe_int(get_valid_value("Publisher Delay"), 10)
+        publisher_message_count = safe_int(get_valid_value("Publisher Message Count"), 1000)
+        
+        artificial_latency = safe_bool(get_valid_value("Enable Artificial Latency"))
+        latency_ms = safe_int(get_valid_value("Artificial Latency (ms)"), 50)
+        
+        nodes_command = get_valid_value("Nodes Command")
+        bootstrap_command = get_valid_value("Bootstrap Command")
+
+        for n in nodes:
+            for d in durations:
+                matrix.append({
+                    "index": i,
+                    "issue_number": issue_number,
+                    "chart": "waku",
+                    "nodecount": n,
+                    "duration": d,
+                    "bootstrap_nodes": bootstrap_nodes,
+                    "docker_image": docker_image,
+                    "pubsub_topic": pubsub_topic,
+                    "publisher_enabled": publisher_enabled,
+                    "publisher_message_size": publisher_message_size,
+                    "publisher_delay": publisher_delay,
+                    "publisher_message_count": publisher_message_count,
+                    "artificial_latency": artificial_latency,
+                    "latency_ms": latency_ms,
+                    "nodes_command": nodes_command,
+                    "bootstrap_command": bootstrap_command,
+                    "parallel_limit": parallel_limit
+                })
+                i += 1
+    elif program == "nimlibp2p":
+        # nimlibp2p-specific parameters
+        peer_number = safe_int(get_valid_value("Peer number"), 0)
+        number_of_peers = safe_int(get_valid_value("Number of peers"), 1000)
+        peers_to_connect = safe_int(get_valid_value("Peers to connect to"), 10)
+        message_rate = safe_int(get_valid_value("Message rate"), 1000)
+        message_size = safe_int(get_valid_value("Message size"), 100)
+        duration = safe_int(get_valid_value("Duration"), 5)
+
+        matrix.append({
+            "index": i,
+            "issue_number": issue_number,
+            "chart": "nimlibp2p",
+            "peer_number": peer_number,
+            "number_of_peers": number_of_peers,
+            "peers_to_connect": peers_to_connect,
+            "message_rate": message_rate,
+            "message_size": message_size,
+            "duration": duration,
+            "docker_image": docker_image,
+            "parallel_limit": parallel_limit
+        })
+        i += 1
+    else:
+        print(f"Unknown program: {program} for issue {issue_number}")
+        return []
+
     return matrix
 
 @task
 def deploy_config(config: dict):
-    print(f"Deploying config: nodes={config['nodecount']}, duration={config['duration']}, image={config['docker_image']}")
+    print(f"Deploying config: chart={config['chart']}, image={config['docker_image']}")
     
     import subprocess
     import yaml
@@ -171,58 +226,101 @@ def deploy_config(config: dict):
                     
         return parts
     
-    # Extract values
+    # Extract common values
     index = config.get("index", "unknown")
-    nodecount = config.get("nodecount", 50)
-    duration = config.get("duration", 5)
-    bootstrap_nodes = config.get("bootstrap_nodes", 3)
     docker_image = config.get("docker_image", "statusteam/nim-waku:latest")
-    pubsub_topic = config.get("pubsub_topic", "/waku/2/rs/2/0")
-    publisher_enabled = config.get("publisher_enabled", False)
-    publisher_message_size = config.get("publisher_message_size", 1)
-    publisher_delay = config.get("publisher_delay", 10)
-    publisher_message_count = config.get("publisher_message_count", 1000)
-    artificial_latency = config.get("artificial_latency", False)
-    latency_ms = config.get("latency_ms", 50)
-    nodes_command = config.get("nodes_command", [])
-    bootstrap_command = config.get("bootstrap_command", [])
-    
-    print(f"Pubsub topic: {pubsub_topic}")
+    chart = config.get("chart", "waku")
     
     # Generate descriptive release name
-    release_name = f"waku-{nodecount}x-{duration}m"
+    if chart == "waku":
+        nodecount = config.get("nodecount", 50)
+        duration = config.get("duration", 5)
+        release_name = f"waku-{nodecount}x-{duration}m"
+    else:  # nimlibp2p
+        peer_number = config.get("peer_number", 0)
+        duration = config.get("duration", 5)
+        release_name = f"nimlibp2p-{peer_number}-{duration}m"
     
-    print(f"Deploying configuration: {release_name} (nodes={nodecount}, duration={duration}m)")
+    print(f"Deploying configuration: {release_name}")
     
-    # Generate values.yaml
-    values = {
-        'global': {
-            'pubSubTopic': pubsub_topic
-        },
-        'replicaCount': {
-            'bootstrap': bootstrap_nodes,
-            'nodes': nodecount
-        },
-        'image': {
-            'repository': docker_image.split(':')[0] if ':' in docker_image else docker_image,
-            'tag': docker_image.split(':')[1] if ':' in docker_image else 'latest',
-            'pullPolicy': 'IfNotPresent'
-        },
-        'bootstrap': {
-            'command': [bootstrap_command] if bootstrap_command and isinstance(bootstrap_command, str) else bootstrap_command or [],
-            'resources': {
-                'requests': {
-                    'memory': "64Mi",
-                    'cpu': "50m"
-                },
-                'limits': {
-                    'memory': "768Mi",
-                    'cpu': "400m"
+    # Generate values.yaml based on chart type
+    if chart == "waku":
+        values = {
+            'global': {
+                'pubSubTopic': config.get("pubsub_topic", "/waku/2/rs/2/0")
+            },
+            'replicaCount': {
+                'bootstrap': config.get("bootstrap_nodes", 3),
+                'nodes': config.get("nodecount", 50)
+            },
+            'image': {
+                'repository': docker_image.split(':')[0] if ':' in docker_image else docker_image,
+                'tag': docker_image.split(':')[1] if ':' in docker_image else 'latest',
+                'pullPolicy': 'IfNotPresent'
+            },
+            'bootstrap': {
+                'command': [config.get("bootstrap_command")] if config.get("bootstrap_command") and isinstance(config.get("bootstrap_command"), str) else config.get("bootstrap_command", []),
+                'resources': {
+                    'requests': {
+                        'memory': "64Mi",
+                        'cpu': "50m"
+                    },
+                    'limits': {
+                        'memory': "768Mi",
+                        'cpu': "400m"
+                    }
                 }
+            },
+            'nodes': {
+                'command': [config.get("nodes_command")] if config.get("nodes_command") and isinstance(config.get("nodes_command"), str) else config.get("nodes_command", []),
+                'resources': {
+                    'requests': {
+                        'memory': "64Mi",
+                        'cpu': "150m"
+                    },
+                    'limits': {
+                        'memory': "600Mi",
+                        'cpu': "500m"
+                    }
+                }
+            },
+            'publisher': {
+                'enabled': config.get("publisher_enabled", False),
+                'image': {
+                    'repository': 'zorlin/publisher',
+                    'tag': 'v0.5.0'
+                },
+                'messageSize': config.get("publisher_message_size", 1),
+                'delaySeconds': config.get("publisher_delay", 10),
+                'messageCount': config.get("publisher_message_count", 1000),
+                'startDelay': {
+                    'enabled': False,
+                    'minutes': 5
+                },
+                'waitForStatefulSet': {
+                    'enabled': True,
+                    'stabilityMinutes': 1
+                }
+            },
+            'artificialLatency': {
+                'enabled': config.get("artificial_latency", False),
+                'latencyMs': config.get("latency_ms", 50)
             }
-        },
-        'nodes': {
-            'command': [nodes_command] if nodes_command and isinstance(nodes_command, str) else nodes_command or [],
+        }
+    else:  # nimlibp2p
+        values = {
+            'image': {
+                'repository': docker_image.split(':')[0] if ':' in docker_image else docker_image,
+                'tag': docker_image.split(':')[1] if ':' in docker_image else 'latest',
+                'pullPolicy': 'IfNotPresent'
+            },
+            'config': {
+                'peerNumber': config.get("peer_number", 0),
+                'numberOfPeers': config.get("number_of_peers", 1000),
+                'peersToConnect': config.get("peers_to_connect", 10),
+                'messageRate': config.get("message_rate", 1000),
+                'messageSize': config.get("message_size", 100)
+            },
             'resources': {
                 'requests': {
                     'memory': "64Mi",
@@ -233,30 +331,7 @@ def deploy_config(config: dict):
                     'cpu': "500m"
                 }
             }
-        },
-        'publisher': {
-            'enabled': publisher_enabled,
-            'image': {
-                'repository': 'zorlin/publisher',
-                'tag': 'v0.5.0'
-            },
-            'messageSize': publisher_message_size,
-            'delaySeconds': publisher_delay,
-            'messageCount': publisher_message_count,
-            'startDelay': {
-                'enabled': False,
-                'minutes': 5
-            },
-            'waitForStatefulSet': {
-                'enabled': True,
-                'stabilityMinutes': 1
-            }
-        },
-        'artificialLatency': {
-            'enabled': artificial_latency,
-            'latencyMs': latency_ms
         }
-    }
     
     # Write values.yaml to a temporary file
     values_file = f"/tmp/values-{release_name}.yaml"
@@ -274,8 +349,9 @@ def deploy_config(config: dict):
         subprocess.run("./get_helm.sh", shell=True)
     
     # Deploy with Helm
-    namespace = "zerotesting"
-    chart_url = "https://github.com/vacp2p/dst-argo-workflows/raw/refs/heads/main/charts/waku-0.4.3.tgz"
+    namespace = "zerotesting" if chart == "waku" else "zerotesting-nimlibp2p"
+    chart_version = "0.4.3" if chart == "waku" else "0.1.0"
+    chart_url = f"https://github.com/vacp2p/dst-argo-workflows/raw/refs/heads/main/charts/{chart}-{chart_version}.tgz"
     
     # Create namespace if it doesn't exist
     try:
@@ -307,8 +383,8 @@ def deploy_config(config: dict):
         raise
     
     # Wait for specified duration
-    duration_seconds = duration * 60
-    print(f"Waiting for {duration} minutes ({duration_seconds} seconds)...")
+    duration_seconds = config.get("duration", 5) * 60
+    print(f"Waiting for {config.get('duration', 5)} minutes ({duration_seconds} seconds)...")
     
     # Wait in smaller chunks with progress updates
     chunk_size = 60  # Report progress every minute
@@ -352,7 +428,7 @@ from src.mesh_analysis.waku_message_log_analyzer import WakuMessageLogAnalyzer
 if __name__ == '__main__':
     # Timestamp of the simulation   
     timestamp = "[{start_time}, {end_time}]"
-    stateful_sets = ["bootstrap", "nodes"]
+    stateful_sets = ["bootstrap", "nodes"] if "{chart}" == "waku" else ["nodes"]
     # Example of data analysis from cluster
     log_analyzer = WakuMessageLogAnalyzer(stateful_sets, timestamp, dump_analysis_dir='local_data/{release_name}/')
     # Example of data analysis from local
@@ -395,10 +471,10 @@ if __name__ == '__main__':
         print(f"Error during repository cloning or analysis: {e}")
         print("You may need to manually clone the repository and run the analysis script.")
     
-    return f"Completed simulation for {nodecount} nodes running for {duration} minutes"
+    return f"Completed simulation for {chart} chart running for {config.get('duration', 5)} minutes"
 
 @flow
-def waku_cron_job(repo_name: str, github_token: str):
+def deployment_cron_job(repo_name: str, github_token: str):
     result, valid_issue = find_valid_issue(repo_name, github_token)
     if result == "VERIFIED" and valid_issue:
         matrix = parse_and_generate_matrix(valid_issue)
@@ -426,7 +502,9 @@ def waku_cron_job(repo_name: str, github_token: str):
         # Wait for any remaining futures
         for future in active_futures:
             future.wait()
+    else:
+        print(f"No valid issues found. Result: {result}")
 
 # Local debug run
 if __name__ == "__main__":
-    waku_cron_job(repo_name="vacp2p/vaclab", github_token="")
+    deployment_cron_job(repo_name="vacp2p/vaclab", github_token="")
