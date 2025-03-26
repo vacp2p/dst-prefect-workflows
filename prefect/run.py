@@ -5,6 +5,10 @@ import base64
 import requests
 import json
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 AUTHORIZED_USERS = ["zorlin", "AlbertoSoutullo", "michatinkers"]
 
@@ -507,4 +511,8 @@ def deployment_cron_job(repo_name: str, github_token: str):
 
 # Local debug run
 if __name__ == "__main__":
-    deployment_cron_job(repo_name="vacp2p/vaclab", github_token="")
+    github_token = os.getenv("GITHUB_TOKEN")
+    if not github_token:
+        print("Error: GITHUB_TOKEN environment variable not set. Please create a .env file with your GitHub token.")
+        exit(1)
+    deployment_cron_job(repo_name="vacp2p/vaclab", github_token=github_token)
