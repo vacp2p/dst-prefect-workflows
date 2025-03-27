@@ -9,11 +9,11 @@ spec:
   serviceName: {{ .Release.Name }}-bootstrap
   selector:
     matchLabels:
-      app: {{ .Release.Name }}-bootstrap
+      app: zerotenkay
   template:
     metadata:
       labels:
-        app: {{ .Release.Name }}-bootstrap
+        app: zerotenkay
     spec:
       containers:
         - name: waku

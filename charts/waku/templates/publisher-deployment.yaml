@@ -7,11 +7,11 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app: {{ .Release.Name }}-publisher
+      app: zerotenkay
   template:
     metadata:
       labels:
-        app: {{ .Release.Name }}-publisher
+        app: zerotenkay
     spec:
       initContainers:
         {{- if or .Values.publisher.startDelay.enabled .Values.publisher.waitForStatefulSet.enabled }}

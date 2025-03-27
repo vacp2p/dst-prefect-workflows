@@ -152,31 +152,28 @@ def parse_and_generate_matrix(valid_issue_encoded: str):
             for d in durations:
                 for docker_image in docker_images:
                     if publisher_enabled:
-                        # If publisher is enabled, generate all combinations with publisher parameters
-                        for msg_size in publisher_message_sizes:
-                            for delay in publisher_delays:
-                                for msg_count in publisher_message_counts:
-                                    matrix.append({
-                                        "index": i,
-                                        "issue_number": issue_number,
-                                        "chart": "waku",
-                                        "nodecount": n,
-                                        "duration": d,
-                                        "bootstrap_nodes": bootstrap_nodes,
-                                        "docker_image": docker_image,
-                                        "pubsub_topic": pubsub_topic,
-                                        "publisher_enabled": publisher_enabled,
-                                        "publisher_message_size": msg_size,
-                                        "publisher_delay": delay,
-                                        "publisher_message_count": msg_count,
-                                        "artificial_latency": artificial_latency,
-                                        "latency_ms": latency_ms,
-                                        "nodes_command": nodes_command,
-                                        "bootstrap_command": bootstrap_command,
-                                        "parallel_limit": parallel_limit
-                                    })
-                                    i += 1
-                                    print(f"Generated {i} matrix entries")
+                        # Only generate entries for the specific test cases we want
+                        matrix.append({
+                            "index": i,
+                            "issue_number": issue_number,
+                            "chart": "waku",
+                            "nodecount": n,
+                            "duration": d,
+                            "bootstrap_nodes": bootstrap_nodes,
+                            "docker_image": docker_image,
+                            "pubsub_topic": pubsub_topic,
+                            "publisher_enabled": publisher_enabled,
+                            "publisher_message_size": 1,  # Fixed at 1KB
+                            "publisher_delay": d,  # Use the duration as the delay
+                            "publisher_message_count": 600,  # Fixed at 600 messages
+                            "artificial_latency": artificial_latency,
+                            "latency_ms": latency_ms,
+                            "nodes_command": nodes_command,
+                            "bootstrap_command": bootstrap_command,
+                            "parallel_limit": parallel_limit
+                        })
+                        i += 1
+                        print(f"Generated {i} matrix entries")
                     else:
                         # If publisher is disabled, generate one entry without publisher parameters
                         matrix.append({
@@ -405,7 +402,7 @@ def deploy_config(config: dict):
     
     # Deploy with Helm
     namespace = "zerotesting" if chart == "waku" else "zerotesting-nimlibp2p"
-    chart_version = "0.4.3" if chart == "waku" else "0.1.0"
+    chart_version = "0.4.4" if chart == "waku" else "0.1.0"
     chart_url = f"https://github.com/vacp2p/dst-argo-workflows/raw/refs/heads/main/charts/{chart}-{chart_version}.tgz"
     
     # Create namespace if it doesn't exist
@@ -458,32 +455,17 @@ def deploy_config(config: dict):
     end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"Finished simulation at: {end_time}")
 
-    # Save simulation times to a file
+    # Create simulation data
     simulation_data = [
         start_time,
         end_time,
         release_name
     ]
     
-    # Create simulations directory if it doesn't exist
-    os.makedirs("simulations", exist_ok=True)
-    
-    # Append to simulations.json
-    simulations_file = "simulations/simulations.json"
-    existing_data = []
-    if os.path.exists(simulations_file):
-        with open(simulations_file, 'r') as f:
-            existing_data = json.load(f)
-    
-    existing_data.append(simulation_data)
-    
-    with open(simulations_file, 'w') as f:
-        json.dump(existing_data, f, indent=2)
-
     # Generate scrape.yaml
     scrape_config = {
         "general_config": {
-            "times_names": existing_data
+            "times_names": [simulation_data]  # Just use this single simulation data
         },
         "scrape_config": {
             "$__rate_interval": "121s",
@@ -508,7 +490,7 @@ def deploy_config(config: dict):
                 "data_points": 25,
                 "folder": ["test/nwaku0.26-f/"],
                 "data": ["libp2p-in", "libp2p-out"],
-                "include_files": [d["release_name"] for d in existing_data],
+                "include_files": [release_name],
                 "xlabel_name": "Simulation",
                 "ylabel_name": "KBytes/s",
                 "show_min_max": False,
@@ -521,7 +503,7 @@ def deploy_config(config: dict):
 
     # Write scrape.yaml
     with open("scrape.yaml", 'w') as f:
-        yaml.dump(scrape_config, f, default_flow_style=False, sort_keys=False)
+        yaml.dump(scrape_config, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
     
     # Clean up
     print("Cleaning up deployment...")
@@ -533,39 +515,47 @@ def deploy_config(config: dict):
         print(f"Warning: Error during cleanup: {e.stderr}")
         print(f"Helm output: {e.stdout}")
     
-    # Generate analysis script
-    print("Generating analysis script...")
-    analysis_dir = "analysis"
-    os.makedirs(analysis_dir, exist_ok=True)
+    return f"Completed simulation for {chart} chart running for {config.get('duration', 5)} minutes"
+
+@task
+def run_analysis(simulation_data: list):
+    import subprocess
+    import os
     
+    print("Generating and running analysis scripts...")
     analysis_script = f"""# Python Imports
 
 # Project Imports
 import src.logger.logger
-from src.mesh_analysis.waku_message_log_analyzer import WakuMessageLogAnalyzer
+from src.metrics.scrapper import Scrapper
+from src.plotting.plotter import Plotter
+from src.utils import file_utils
+
+
+
+def main():
+    url = "https://metrics.riff.cc/select/0/prometheus/api/v1/"
+    scrape_config = "scrape.yaml"
+
+    scrapper = Scrapper("ruby.yaml", url, scrape_config)
+    scrapper.query_and_dump_metrics()
+
+    config_dict = file_utils.read_yaml_file("scrape.yaml")
+    plotter = Plotter(config_dict["plotting"])
+    plotter.create_plots()
 
 
 if __name__ == '__main__':
-    # Timestamp of the simulation   
-    timestamp = "[{start_time}, {end_time}]"
-    stateful_sets = ["bootstrap", "nodes"] if "{chart}" == "waku" else ["nodes"]
-    # Example of data analysis from cluster
-    log_analyzer = WakuMessageLogAnalyzer(stateful_sets, timestamp, dump_analysis_dir='local_data/{release_name}/')
-    # Example of data analysis from local
-    # log_analyzer = WakuMessageLogAnalyzer(local_folder_to_analyze='lpt_duptest_debug', dump_analysis_dir='lpt_duptest_debug/notion')
-
-    log_analyzer.analyze_message_logs(True)
-    log_analyzer.check_store_messages()
-    log_analyzer.analyze_message_timestamps(time_difference_threshold=2)
+    main()
 """
-    
-    analysis_file = f"{analysis_dir}/analyse_{release_name}.py"
+        
+    analysis_file = f"10ksim/analyse.py"
     with open(analysis_file, "w") as f:
         f.write(analysis_script)
     
     print(f"Analysis script generated at {analysis_file}")
     
-    # Clone and run analysis
+    # Clone and run analysis for all simulations
     print("Cloning 10ksim repository...")
     try:
         # Check if already cloned
@@ -573,25 +563,22 @@ if __name__ == '__main__':
             clone_cmd = ["git", "clone", "https://github.com/vacp2p/10ksim.git"]
             subprocess.run(clone_cmd, check=True)
         
-        # Copy analysis script to the repository
-        cp_cmd = ["cp", analysis_file, "10ksim/"]
+        cp_cmd = ["cp", f"{analysis_dir}/analyse.py", "10ksim/"]
         subprocess.run(cp_cmd, check=True)
         
-        # Run the analysis
-        print(f"Running analysis script...")
-        analysis_run_cmd = ["python3", f"10ksim/analyse_{release_name}.py"]
+        # Run analysis script once
+        print("Running analysis script...")
+        analysis_run_cmd = ["python3", f"10ksim/analyse.py"]
         try:
             analysis_result = subprocess.run(analysis_run_cmd, capture_output=True, text=True, check=True)
-            print(f"Analysis complete. Output:")
+            print("Analysis complete. Output:")
             print(analysis_result.stdout)
         except subprocess.CalledProcessError as e:
             print(f"Warning: Error during analysis: {e.stderr}")
-            print(f"Analysis may require manual execution.")
+            print("Analysis may require manual execution.")
     except Exception as e:
         print(f"Error during repository cloning or analysis: {e}")
-        print("You may need to manually clone the repository and run the analysis script.")
-    
-    return f"Completed simulation for {chart} chart running for {config.get('duration', 5)} minutes"
+        print("You may need to manually clone the repository and run the analysis scripts.")
 
 @flow
 def deployment_cron_job(repo_name: str, github_token: str):
@@ -607,21 +594,27 @@ def deployment_cron_job(repo_name: str, github_token: str):
         
         print(f"Running with parallelism limit of {parallel_limit}")
         
-        # Create a list to store all the futures
+        # Create a list to store all the futures and their results
         active_futures = []
+        simulation_results = []
         
         for config in matrix:
             # If we've reached the parallelism limit, wait for one task to complete
             while len(active_futures) >= parallel_limit:
                 # Wait for the first future to complete and remove it
                 completed = active_futures.pop(0).wait()
+                simulation_results.append(completed)
             
             # Submit the next task
             active_futures.append(deploy_config.submit(config))
         
-        # Wait for any remaining futures
+        # Wait for all simulations to complete
         for future in active_futures:
-            future.wait()
+            simulation_results.append(future.wait())
+            
+        # Run analysis for all simulations
+        if simulation_results:
+            run_analysis(simulation_results)
     else:
         print(f"No valid issues found. Result: {result}")
 

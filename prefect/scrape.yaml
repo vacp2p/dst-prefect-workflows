@@ -1,14 +1,6 @@
 general_config:
   times_names:
-  - start_time: '2025-03-27 12:12:20'
-    end_time: '2025-03-27 12:13:28'
-    simulation_name: 100K-100mgs-10s-1KB
-  - start_time: '2025-03-27 12:13:34'
-    end_time: '2025-03-27 12:14:42'
-    simulation_name: 200K-100mgs-10s-1KB
-  - start_time: '2025-03-27 12:14:47'
-    end_time: '2025-03-27 12:15:55'
-    simulation_name: 300K-100mgs-10s-1KB
+  - ['2025-03-27 14:30:27', '2025-03-27 14:31:35', 'waku-100-1000mgs-1s-1kb']
 scrape_config:
   $__rate_interval: 121s
   step: 60s
@@ -34,9 +26,7 @@ plotting:
     - libp2p-in
     - libp2p-out
     include_files:
-    - 100K-100mgs-10s-1KB
-    - 200K-100mgs-10s-1KB
-    - 300K-100mgs-10s-1KB
+    - waku-100-1000mgs-1s-1kb
     xlabel_name: Simulation
     ylabel_name: KBytes/s
     show_min_max: false

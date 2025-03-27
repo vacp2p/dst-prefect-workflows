@@ -8,11 +8,11 @@ spec:
   serviceName: {{ .Release.Name }}-service
   selector:
     matchLabels:
-      app: {{ .Release.Name }}-nodes
+      app: zerotenkay
   template:
     metadata:
       labels:
-        app: {{ .Release.Name }}-nodes
+        app: zerotenkay
     spec:
       dnsConfig:
         searches:
