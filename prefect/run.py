@@ -402,7 +402,7 @@ def deploy_config(config: dict):
     
     # Deploy with Helm
     namespace = "zerotesting" if chart == "waku" else "zerotesting-nimlibp2p"
-    chart_version = "0.4.4" if chart == "waku" else "0.1.0"
+    chart_version = "0.4.5" if chart == "waku" else "0.1.0"
     chart_url = f"https://github.com/vacp2p/dst-argo-workflows/raw/refs/heads/main/charts/{chart}-{chart_version}.tgz"
     
     # Create namespace if it doesn't exist
@@ -462,10 +462,86 @@ def deploy_config(config: dict):
         release_name
     ]
     
-    # Generate scrape.yaml
+    # Clean up
+    print("Cleaning up deployment...")
+    cleanup_cmd = ["helm", "uninstall", release_name, "--namespace", namespace]
+    try:
+        cleanup_result = subprocess.run(cleanup_cmd, capture_output=True, text=True, check=True)
+        print(f"Successfully cleaned up deployment {release_name}")
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: Error during cleanup: {e.stderr}")
+        print(f"Helm output: {e.stdout}")
+    
+    return simulation_data
+
+@task
+def run_analysis(simulation_data: list):
+    import subprocess
+    import os
+    
+    # Clone and run analysis for all simulations
+    print("Cloning 10ksim repository...")
+    try:
+        # Check if already cloned
+        if not os.path.exists("10ksim"):
+            clone_cmd = ["git", "clone", "https://github.com/vacp2p/10ksim.git"]
+            subprocess.run(clone_cmd, check=True)
+
+        print("Generating and running analysis scripts...")
+        analysis_script = f"""# Python Imports
+
+# Project Imports
+import src.logger.logger
+from src.metrics.scrapper import Scrapper
+from src.plotting.plotter import Plotter
+from src.utils import file_utils
+
+
+
+def main():
+    url = "https://metrics.riff.cc/select/0/prometheus/api/v1/"
+    scrape_config = "scrape.yaml"
+
+    scrapper = Scrapper("ruby.yaml", url, scrape_config)
+    scrapper.query_and_dump_metrics()
+
+    config_dict = file_utils.read_yaml_file("scrape.yaml")
+    plotter = Plotter(config_dict["plotting"])
+    plotter.create_plots()
+
+
+if __name__ == '__main__':
+    main()
+        """
+            
+        analysis_file = f"10ksim/analyse.py"
+        with open(analysis_file, "w") as f:
+            f.write(analysis_script)
+        
+        print(f"Analysis script generated at {analysis_file}")
+
+        # Run analysis script once
+        print("Running analysis script...")
+        analysis_run_cmd = ["python3", f"10ksim/analyse.py"]
+        try:
+            analysis_result = subprocess.run(analysis_run_cmd, capture_output=True, text=True, check=True)
+            print("Analysis complete. Output:")
+            print(analysis_result.stdout)
+        except subprocess.CalledProcessError as e:
+            print(f"Warning: Error during analysis: {e.stderr}")
+            print("Analysis may require manual execution.")
+    except Exception as e:
+        print(f"Error during repository cloning or analysis: {e}")
+        print("You may need to manually clone the repository and run the analysis scripts.")
+
+@task
+def generate_scrape_yaml(simulation_data: list):
+    import yaml
+    
+    # Generate scrape.yaml with all simulation data
     scrape_config = {
         "general_config": {
-            "times_names": [simulation_data]  # Just use this single simulation data
+            "times_names": simulation_data  # Use all collected simulation data
         },
         "scrape_config": {
             "$__rate_interval": "121s",
@@ -490,7 +566,7 @@ def deploy_config(config: dict):
                 "data_points": 25,
                 "folder": ["test/nwaku0.26-f/"],
                 "data": ["libp2p-in", "libp2p-out"],
-                "include_files": [release_name],
+                "include_files": [d[2] for d in simulation_data],  # Use all release names
                 "xlabel_name": "Simulation",
                 "ylabel_name": "KBytes/s",
                 "show_min_max": False,
@@ -501,84 +577,23 @@ def deploy_config(config: dict):
         }
     }
 
-    # Write scrape.yaml
+    # Write scrape.yaml with custom formatting for times_names
     with open("scrape.yaml", 'w') as f:
-        yaml.dump(scrape_config, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
-    
-    # Clean up
-    print("Cleaning up deployment...")
-    cleanup_cmd = ["helm", "uninstall", release_name, "--namespace", namespace]
-    try:
-        cleanup_result = subprocess.run(cleanup_cmd, capture_output=True, text=True, check=True)
-        print(f"Successfully cleaned up deployment {release_name}")
-    except subprocess.CalledProcessError as e:
-        print(f"Warning: Error during cleanup: {e.stderr}")
-        print(f"Helm output: {e.stdout}")
-    
-    return f"Completed simulation for {chart} chart running for {config.get('duration', 5)} minutes"
-
-@task
-def run_analysis(simulation_data: list):
-    import subprocess
-    import os
-    
-    print("Generating and running analysis scripts...")
-    analysis_script = f"""# Python Imports
-
-# Project Imports
-import src.logger.logger
-from src.metrics.scrapper import Scrapper
-from src.plotting.plotter import Plotter
-from src.utils import file_utils
-
-
-
-def main():
-    url = "https://metrics.riff.cc/select/0/prometheus/api/v1/"
-    scrape_config = "scrape.yaml"
-
-    scrapper = Scrapper("ruby.yaml", url, scrape_config)
-    scrapper.query_and_dump_metrics()
-
-    config_dict = file_utils.read_yaml_file("scrape.yaml")
-    plotter = Plotter(config_dict["plotting"])
-    plotter.create_plots()
-
-
-if __name__ == '__main__':
-    main()
-"""
+        # First write the general_config section with times_names as arrays
+        f.write("general_config:\n")
+        f.write("  times_names:\n")
+        for data in simulation_data:
+            f.write(f"  - {data}\n")
         
-    analysis_file = f"10ksim/analyse.py"
-    with open(analysis_file, "w") as f:
-        f.write(analysis_script)
-    
-    print(f"Analysis script generated at {analysis_file}")
-    
-    # Clone and run analysis for all simulations
-    print("Cloning 10ksim repository...")
-    try:
-        # Check if already cloned
-        if not os.path.exists("10ksim"):
-            clone_cmd = ["git", "clone", "https://github.com/vacp2p/10ksim.git"]
-            subprocess.run(clone_cmd, check=True)
-        
-        cp_cmd = ["cp", f"{analysis_dir}/analyse.py", "10ksim/"]
-        subprocess.run(cp_cmd, check=True)
-        
-        # Run analysis script once
-        print("Running analysis script...")
-        analysis_run_cmd = ["python3", f"10ksim/analyse.py"]
-        try:
-            analysis_result = subprocess.run(analysis_run_cmd, capture_output=True, text=True, check=True)
-            print("Analysis complete. Output:")
-            print(analysis_result.stdout)
-        except subprocess.CalledProcessError as e:
-            print(f"Warning: Error during analysis: {e.stderr}")
-            print("Analysis may require manual execution.")
-    except Exception as e:
-        print(f"Error during repository cloning or analysis: {e}")
-        print("You may need to manually clone the repository and run the analysis scripts.")
+        # Then write the rest of the config
+        f.write("\n")
+        yaml.dump(
+            {k: v for k, v in scrape_config.items() if k != "general_config"},
+            f,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True
+        )
 
 @flow
 def deployment_cron_job(repo_name: str, github_token: str):
@@ -602,7 +617,7 @@ def deployment_cron_job(repo_name: str, github_token: str):
             # If we've reached the parallelism limit, wait for one task to complete
             while len(active_futures) >= parallel_limit:
                 # Wait for the first future to complete and remove it
-                completed = active_futures.pop(0).wait()
+                completed = active_futures.pop(0).result()
                 simulation_results.append(completed)
             
             # Submit the next task
@@ -610,10 +625,12 @@ def deployment_cron_job(repo_name: str, github_token: str):
         
         # Wait for all simulations to complete
         for future in active_futures:
-            simulation_results.append(future.wait())
-            
-        # Run analysis for all simulations
+            simulation_results.append(future.result())
+
+        print(f"Simulation results: {simulation_results}")
+        # Generate scrape.yaml with all simulation data
         if simulation_results:
+            generate_scrape_yaml(simulation_results)
             run_analysis(simulation_results)
     else:
         print(f"No valid issues found. Result: {result}")

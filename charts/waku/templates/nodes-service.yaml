@@ -6,4 +6,4 @@ metadata:
 spec:
   clusterIP: None
   selector:
-    app: {{ .Release.Name }}-nodes
+    app: zerotenkay
