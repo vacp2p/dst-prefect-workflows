@@ -87,6 +87,11 @@ def parse_and_generate_matrix(valid_issue_encoded: str):
             val = default
         return [int(v.strip()) for v in val.split(",") if v.strip().isdigit()]
     
+    def parse_string_list(val, default=""):
+        if not val or val == "_No response_":
+            val = default
+        return [v.strip() for v in val.split(",") if v.strip()]
+    
     def safe_int(val, default):
         if not val or val == "_No response_":
             return default
@@ -109,7 +114,7 @@ def parse_and_generate_matrix(valid_issue_encoded: str):
     # Common parameters for both charts
     parallel_runs = parse_list(get_valid_value("Parallelism", "1"))
     parallel_limit = parallel_runs[0] if parallel_runs else 1
-    docker_image = get_valid_value("Docker image", "statusteam/nim-waku:latest")
+    docker_images = parse_string_list(get_valid_value("Docker image", "statusteam/nim-waku:latest"))
 
     matrix = []
     i = 0
@@ -130,9 +135,11 @@ def parse_and_generate_matrix(valid_issue_encoded: str):
             print(f"Using provided pubsub topic: {pubsub_topic}")
         
         publisher_enabled = safe_bool(get_valid_value("Enable Publisher"))
-        publisher_message_size = safe_int(get_valid_value("Publisher Message Size"), 1)
-        publisher_delay = safe_int(get_valid_value("Publisher Delay"), 10)
-        publisher_message_count = safe_int(get_valid_value("Publisher Message Count"), 1000)
+        
+        # Matrix parameters for publisher settings
+        publisher_message_sizes = parse_list(get_valid_value("Publisher Message Size"), "1")
+        publisher_delays = parse_list(get_valid_value("Publisher Delay"), "10")
+        publisher_message_counts = parse_list(get_valid_value("Publisher Message Count"), "1000")
         
         artificial_latency = safe_bool(get_valid_value("Enable Artificial Latency"))
         latency_ms = safe_int(get_valid_value("Artificial Latency (ms)"), 50)
@@ -140,28 +147,59 @@ def parse_and_generate_matrix(valid_issue_encoded: str):
         nodes_command = get_valid_value("Nodes Command")
         bootstrap_command = get_valid_value("Bootstrap Command")
 
+        # Generate matrix for all combinations
         for n in nodes:
             for d in durations:
-                matrix.append({
-                    "index": i,
-                    "issue_number": issue_number,
-                    "chart": "waku",
-                    "nodecount": n,
-                    "duration": d,
-                    "bootstrap_nodes": bootstrap_nodes,
-                    "docker_image": docker_image,
-                    "pubsub_topic": pubsub_topic,
-                    "publisher_enabled": publisher_enabled,
-                    "publisher_message_size": publisher_message_size,
-                    "publisher_delay": publisher_delay,
-                    "publisher_message_count": publisher_message_count,
-                    "artificial_latency": artificial_latency,
-                    "latency_ms": latency_ms,
-                    "nodes_command": nodes_command,
-                    "bootstrap_command": bootstrap_command,
-                    "parallel_limit": parallel_limit
-                })
-                i += 1
+                for docker_image in docker_images:
+                    if publisher_enabled:
+                        # If publisher is enabled, generate all combinations with publisher parameters
+                        for msg_size in publisher_message_sizes:
+                            for delay in publisher_delays:
+                                for msg_count in publisher_message_counts:
+                                    matrix.append({
+                                        "index": i,
+                                        "issue_number": issue_number,
+                                        "chart": "waku",
+                                        "nodecount": n,
+                                        "duration": d,
+                                        "bootstrap_nodes": bootstrap_nodes,
+                                        "docker_image": docker_image,
+                                        "pubsub_topic": pubsub_topic,
+                                        "publisher_enabled": publisher_enabled,
+                                        "publisher_message_size": msg_size,
+                                        "publisher_delay": delay,
+                                        "publisher_message_count": msg_count,
+                                        "artificial_latency": artificial_latency,
+                                        "latency_ms": latency_ms,
+                                        "nodes_command": nodes_command,
+                                        "bootstrap_command": bootstrap_command,
+                                        "parallel_limit": parallel_limit
+                                    })
+                                    i += 1
+                                    print(f"Generated {i} matrix entries")
+                    else:
+                        # If publisher is disabled, generate one entry without publisher parameters
+                        matrix.append({
+                            "index": i,
+                            "issue_number": issue_number,
+                            "chart": "waku",
+                            "nodecount": n,
+                            "duration": d,
+                            "bootstrap_nodes": bootstrap_nodes,
+                            "docker_image": docker_image,
+                            "pubsub_topic": pubsub_topic,
+                            "publisher_enabled": publisher_enabled,
+                            "publisher_message_size": 0,
+                            "publisher_delay": 0,
+                            "publisher_message_count": 0,
+                            "artificial_latency": artificial_latency,
+                            "latency_ms": latency_ms,
+                            "nodes_command": nodes_command,
+                            "bootstrap_command": bootstrap_command,
+                            "parallel_limit": parallel_limit
+                        })
+                        i += 1
+                        print(f"Generated {i} matrix entries")
     elif program == "nimlibp2p":
         # nimlibp2p-specific parameters
         peer_number = safe_int(get_valid_value("Peer number"), 0)
@@ -181,10 +219,11 @@ def parse_and_generate_matrix(valid_issue_encoded: str):
             "message_rate": message_rate,
             "message_size": message_size,
             "duration": duration,
-            "docker_image": docker_image,
+            "docker_image": docker_images[0],
             "parallel_limit": parallel_limit
         })
         i += 1
+        print(f"Generated {i} matrix entries")
     else:
         print(f"Unknown program: {program} for issue {issue_number}")
         return []
@@ -238,12 +277,24 @@ def deploy_config(config: dict):
     # Generate descriptive release name
     if chart == "waku":
         nodecount = config.get("nodecount", 50)
-        duration = config.get("duration", 5)
-        release_name = f"waku-{nodecount}x-{duration}m"
+        message_rate = 1000 // config.get("publisher_delay", 10)  # messages per second
+        message_size = config.get("publisher_message_size", 1)
+        k_value = nodecount/1000
+        if k_value >= 1:
+            k_str = f"{int(k_value)}K"
+        else:
+            k_str = f"{int(nodecount)}"
+        release_name = f"waku-{k_str}-{message_rate}mgs-{config.get('publisher_delay', 10)}s-{message_size}kb"
     else:  # nimlibp2p
         peer_number = config.get("peer_number", 0)
-        duration = config.get("duration", 5)
-        release_name = f"nimlibp2p-{peer_number}-{duration}m"
+        message_rate = config.get("message_rate", 1000)
+        message_size = config.get("message_size", 100)
+        k_value = peer_number/1000
+        if k_value >= 1:
+            k_str = f"{int(k_value)}K"
+        else:
+            k_str = f"{int(peer_number)}"
+        release_name = f"nimlibp2p-{k_str}-{message_rate}mgs-{message_size}KB"
     
     print(f"Deploying configuration: {release_name}")
     
@@ -373,7 +424,7 @@ def deploy_config(config: dict):
     ]
     
     # Record the start time of the simulation
-    start_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"Starting simulation at: {start_time}")
     
     print(f"Running Helm command: {' '.join(helm_cmd)}")
@@ -404,8 +455,73 @@ def deploy_config(config: dict):
         print(f"Progress: {duration_seconds}/{duration_seconds} seconds elapsed")
     
     # Record the end time of the simulation
-    end_time = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"Finished simulation at: {end_time}")
+
+    # Save simulation times to a file
+    simulation_data = [
+        start_time,
+        end_time,
+        release_name
+    ]
+    
+    # Create simulations directory if it doesn't exist
+    os.makedirs("simulations", exist_ok=True)
+    
+    # Append to simulations.json
+    simulations_file = "simulations/simulations.json"
+    existing_data = []
+    if os.path.exists(simulations_file):
+        with open(simulations_file, 'r') as f:
+            existing_data = json.load(f)
+    
+    existing_data.append(simulation_data)
+    
+    with open(simulations_file, 'w') as f:
+        json.dump(existing_data, f, indent=2)
+
+    # Generate scrape.yaml
+    scrape_config = {
+        "general_config": {
+            "times_names": existing_data
+        },
+        "scrape_config": {
+            "$__rate_interval": "121s",
+            "step": "60s",
+            "dump_location": "test/nwaku0.26-f/"
+        },
+        "metrics_to_scrape": {
+            "libp2p_network_in": {
+                "query": "rate(libp2p_network_bytes_total{direction='in'}[$__rate_interval])",
+                "extract_field": "instance",
+                "folder_name": "libp2p-in/"
+            },
+            "libp2p_network_out": {
+                "query": "rate(libp2p_network_bytes_total{direction='out'}[$__rate_interval])",
+                "extract_field": "instance",
+                "folder_name": "libp2p-out/"
+            }
+        },
+        "plotting": {
+            "bandwidth-0-33-3K": {
+                "ignore_columns": ["bootstrap", "midstrap"],
+                "data_points": 25,
+                "folder": ["test/nwaku0.26-f/"],
+                "data": ["libp2p-in", "libp2p-out"],
+                "include_files": [d["release_name"] for d in existing_data],
+                "xlabel_name": "Simulation",
+                "ylabel_name": "KBytes/s",
+                "show_min_max": False,
+                "outliers": True,
+                "scale-x": 1000,
+                "fig_size": [20, 20]
+            }
+        }
+    }
+
+    # Write scrape.yaml
+    with open("scrape.yaml", 'w') as f:
+        yaml.dump(scrape_config, f, default_flow_style=False, sort_keys=False)
     
     # Clean up
     print("Cleaning up deployment...")

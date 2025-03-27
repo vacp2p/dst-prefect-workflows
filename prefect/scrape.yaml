@@ -1,0 +1,47 @@
+general_config:
+  times_names:
+  - start_time: '2025-03-27 12:12:20'
+    end_time: '2025-03-27 12:13:28'
+    simulation_name: 100K-100mgs-10s-1KB
+  - start_time: '2025-03-27 12:13:34'
+    end_time: '2025-03-27 12:14:42'
+    simulation_name: 200K-100mgs-10s-1KB
+  - start_time: '2025-03-27 12:14:47'
+    end_time: '2025-03-27 12:15:55'
+    simulation_name: 300K-100mgs-10s-1KB
+scrape_config:
+  $__rate_interval: 121s
+  step: 60s
+  dump_location: test/nwaku0.26-f/
+metrics_to_scrape:
+  libp2p_network_in:
+    query: rate(libp2p_network_bytes_total{direction='in'}[$__rate_interval])
+    extract_field: instance
+    folder_name: libp2p-in/
+  libp2p_network_out:
+    query: rate(libp2p_network_bytes_total{direction='out'}[$__rate_interval])
+    extract_field: instance
+    folder_name: libp2p-out/
+plotting:
+  bandwidth-0-33-3K:
+    ignore_columns:
+    - bootstrap
+    - midstrap
+    data_points: 25
+    folder:
+    - test/nwaku0.26-f/
+    data:
+    - libp2p-in
+    - libp2p-out
+    include_files:
+    - 100K-100mgs-10s-1KB
+    - 200K-100mgs-10s-1KB
+    - 300K-100mgs-10s-1KB
+    xlabel_name: Simulation
+    ylabel_name: KBytes/s
+    show_min_max: false
+    outliers: true
+    scale-x: 1000
+    fig_size:
+    - 20
+    - 20

@@ -4,6 +4,7 @@ metadata:
   name: {{ .Release.Name }}-nodes
 spec:
   replicas: {{ .Values.replicaCount.nodes }}
+  podManagementPolicy: "Parallel"
   serviceName: {{ .Release.Name }}-service
   selector:
     matchLabels:
