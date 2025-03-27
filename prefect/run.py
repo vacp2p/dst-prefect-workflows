@@ -402,7 +402,7 @@ def deploy_config(config: dict):
     
     # Deploy with Helm
     namespace = "zerotesting" if chart == "waku" else "zerotesting-nimlibp2p"
-    chart_version = "0.4.5" if chart == "waku" else "0.1.0"
+    chart_version = "0.4.6" if chart == "waku" else "0.1.0"
     chart_url = f"https://github.com/vacp2p/dst-argo-workflows/raw/refs/heads/main/charts/{chart}-{chart_version}.tgz"
     
     # Create namespace if it doesn't exist
