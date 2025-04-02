@@ -2,3 +2,4 @@ prefect/10ksim/
 **/.env
 **/ruby.yaml
 **/target/**
+**/lars_db.sqlite*

@@ -1,237 +1,283 @@
-<!doctype html>
-{# Use theme detection script - Apply dark mode immediately to prevent flash #}
-<html lang="en" class="no-js"> {# Add no-js initially #}
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LARS - Lab Automated Resource Scheduler</title>
-    <link rel="icon" href="/static/favicon.ico" type="image/x-icon"> {# Add favicon link #}
+{% extends "base.html.j2" %}
 
-    {# Theme initialization script (adapted from Dragonfly) #}
-    <script>
-        (function() {
-            // Use localStorage first, then system preference
-            const theme = localStorage.getItem('theme') || 'system';
-            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-            const shouldBeDark = theme === 'dark' || (theme === 'system' && prefersDark);
+{% block title %}LARS - Lab Automated Resource Scheduler{% endblock %}
 
-            // Apply theme immediately
-            if (shouldBeDark) {
-                document.documentElement.classList.add('dark');
-            } else {
-                document.documentElement.classList.remove('dark');
-            }
-            // Set data-theme attribute
-            document.documentElement.setAttribute('data-theme', theme);
+{% block content %}
+<div class="container mx-auto px-4 py-8">
+    <h1 class="text-3xl font-bold mb-8">LARS Dashboard</h1>
 
-            // Make page visible now that theme is potentially applied
-            document.documentElement.classList.remove('no-js');
-            // Ensure display is set (might be redundant if no-js rule handles it)
-            // document.documentElement.style.display = 'block';
-        })();
-    </script>
-
-    {# Inter font from Google Fonts #}
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-
-    {# Link to compiled Tailwind CSS #}
-    <link href="/static/output.css" rel="stylesheet">
-
-    {# Style to hide elements during Alpine/JS init #}
-    <style>
-        [x-cloak] { display: none !important; }
-        /* Prevent flash of unstyled content */
-        html.no-js { display: none; }
-    </style>
-
-    {# Include LiveReload script if provided (debug builds) #}
-    {# The LiveReloadLayer injects this automatically, no need for template var #}
-
-</head>
-{# Add dark mode base classes and Inter font #}
-<body class="font-sans antialiased bg-gray-100 text-gray-900 dark:bg-gray-900 dark:text-gray-200 min-h-screen flex flex-col">
-
-    {# Basic Navbar Placeholder #}
-    <nav class="bg-white dark:bg-gray-800 shadow-md sticky top-0 z-10">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="flex justify-between h-16">
-                <div class="flex items-center">
-                    <span class="text-2xl font-bold text-indigo-600 dark:text-indigo-400">LARS</span>
-                </div>
-                {# Add theme toggle button later if needed #}
-            </div>
-        </div>
-    </nav>
-
-    {# Main Content Area #}
-    <main class="flex-grow container mx-auto p-6">
-        <h1 class="text-3xl font-bold mb-6 text-gray-800 dark:text-gray-100">LARS Dashboard</h1>
-
-        {# Mock Submission Form Card #}
-        <div class="mb-8 bg-white dark:bg-gray-800 p-5 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700">
-            <h2 class="text-xl font-semibold mb-4 text-gray-700 dark:text-gray-200">Submit Mock Simulations</h2>
-            <form id="mock-submit-form" class="flex flex-wrap items-end gap-4">
-                <div>
-                    <label for="mock-count" class="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-1">Number to Add:</label>
-                    <input type="number" id="mock-count" name="count" value="5" min="1" max="50" class="block w-28 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
-                </div>
-                <div>
-                    <label for="mock-nodes" class="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-1">Base Nodes:</label>
-                    <input type="number" id="mock-nodes" name="base_nodes" value="100" min="10" max="1000" step="10" class="block w-28 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
-                </div>
-                <button type="submit" class="self-end inline-flex justify-center py-2 px-5 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 focus:ring-offset-gray-100 dark:focus:ring-offset-gray-900 transition duration-150 ease-in-out">Submit</button>
-            </form>
-            <p id="submit-status" class="text-sm text-gray-500 dark:text-gray-400 mt-3 h-4"></p> {# Reserve height #}
-        </div>
-
-        {# Simulation Lists Grid #}
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- Mock Submission Form -->
+    <div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-6 mb-8">
+        <h2 class="text-xl font-semibold mb-4 text-white">Submit Mock Simulations</h2>
+        <div class="flex flex-wrap items-end gap-4">
             <div>
-                <h2 class="text-2xl font-semibold mb-4 text-gray-700 dark:text-gray-200">Queued Simulations</h2>
-                <div id="queued-simulations" class="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-lg space-y-3 min-h-[150px] border border-gray-200 dark:border-gray-700">
-                    <p class="text-gray-500 dark:text-gray-400 italic">Waiting for data...</p>
+                <label for="count" class="block text-sm font-medium text-gray-300 mb-2">Number to Add:</label>
+                <div class="relative rounded-md shadow-sm">
+                    <input type="number" name="count" id="count" min="1" max="10" value="5" class="bg-gray-700 text-white focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 rounded-md">
+                    <div class="absolute inset-y-0 right-0 flex items-center">
+                        <button id="increment" class="h-full px-3 text-gray-300 hover:text-white">+</button>
+                        <button id="decrement" class="h-full px-3 text-gray-300 hover:text-white">-</button>
+                    </div>
                 </div>
             </div>
-
             <div>
-                <h2 class="text-2xl font-semibold mb-4 text-gray-700 dark:text-gray-200">Active Simulations</h2>
-                <div id="active-simulations" class="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-lg space-y-3 min-h-[150px] border border-gray-200 dark:border-gray-700">
-                    <p class="text-gray-500 dark:text-gray-400 italic">Waiting for data...</p>
+                <label for="baseNodes" class="block text-sm font-medium text-gray-300 mb-2">Base Nodes:</label>
+                <div class="relative rounded-md shadow-sm">
+                    <input type="number" name="baseNodes" id="baseNodes" min="1" max="1000" value="100" class="bg-gray-700 text-white focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 rounded-md">
+                    <div class="absolute inset-y-0 right-0 flex items-center">
+                        <button id="incrementNodes" class="h-full px-3 text-gray-300 hover:text-white">+</button>
+                        <button id="decrementNodes" class="h-full px-3 text-gray-300 hover:text-white">-</button>
+                    </div>
                 </div>
             </div>
+            <button id="submit-button" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-8 rounded-md transition-colors">
+                Submit
+            </button>
         </div>
-    </main>
+    </div>
 
-    {# Basic Footer Placeholder #}
-    <footer class="bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 mt-8 py-4">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <p class="text-center text-sm text-gray-500 dark:text-gray-400">
-                LARS - Lab Automated Resource Scheduler
-            </p>
+    <!-- Main Dashboard Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+        <!-- Queued Simulations -->
+        <div class="md:col-span-1">
+            <h2 class="text-xl font-semibold mb-4">Queued Simulations</h2>
+            <div id="queue-container" class="space-y-4">
+                <!-- Queue items will be added dynamically here -->
+            </div>
         </div>
-    </footer>
 
-    <script>
-        const queuedList = document.getElementById('queued-simulations');
-        const activeList = document.getElementById('active-simulations');
-        const mockForm = document.getElementById('mock-submit-form');
-        const submitStatus = document.getElementById('submit-status');
+        <!-- Active Simulations -->
+        <div class="md:col-span-1">
+            <h2 class="text-xl font-semibold mb-4">Active Simulations</h2>
+            <div id="active-container" class="space-y-4">
+                <!-- Active items will be added dynamically here -->
+            </div>
+        </div>
 
-        // --- Simulation Card Renderer ---
-        function formatSim(sim, is_active = false) {
-            const cost = is_active ? sim.actual_cost : sim.predicted_cost;
-            const pred_cost = sim.predicted_cost;
-            const id = is_active ? sim.simulation_id : sim.request_id;
-
-            // Format costs with 2 decimal places
-            const cpuActual = cost.cpu_cores.toFixed(2);
-            const memActual = cost.memory_gb.toFixed(2);
-            const cpuPred = pred_cost.cpu_cores.toFixed(2);
-            const memPred = pred_cost.memory_gb.toFixed(2);
-
-            let costHtml = `CPU: <span class="font-semibold">${cpuActual}</span> cores | Mem: <span class="font-semibold">${memActual}</span> GB`;
-            if (is_active) {
-                // Show predicted cost in parentheses for active simulations
-                costHtml += ` <span class="text-xs text-gray-500 dark:text-gray-400">(Pred: ${cpuPred} / ${memPred})</span>`;
-            }
-
-            return `
-                <div class="border border-gray-200 dark:border-gray-700 p-3 rounded-md bg-gray-50 dark:bg-gray-700/50 shadow-sm" data-id="${id}">
-                    <p class="font-medium text-gray-800 dark:text-gray-100">${sim.params.chart} (<span class="font-normal">${sim.params.node_count} nodes, ${sim.params.duration_mins} min</span>)</p>
-                    <p class="text-sm text-gray-600 dark:text-gray-300 mt-1">${is_active ? 'Actual' : 'Predicted'} Cost: ${costHtml}</p>
-                    <p class="text-xs text-gray-400 dark:text-gray-500 mt-1 font-mono">ID: ${id}</p>
+        <!-- Last Finished Simulation -->
+        <div class="md:col-span-1">
+            <h2 class="text-xl font-semibold mb-4">Last Finished Simulation</h2>
+            <div id="last-finished-container">
+                <div id="no-finished" class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4 text-gray-300">
+                    No simulations completed yet.
                 </div>
-            `;
+                <!-- Last finished simulation will be added dynamically here -->
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // DOM elements
+    const queueContainer = document.getElementById('queue-container');
+    const activeContainer = document.getElementById('active-container');
+    const lastFinishedContainer = document.getElementById('last-finished-container');
+    const noFinishedElement = document.getElementById('no-finished');
+    const countInput = document.getElementById('count');
+    const baseNodesInput = document.getElementById('baseNodes');
+    const submitButton = document.getElementById('submit-button');
+    const incrementButton = document.getElementById('increment');
+    const decrementButton = document.getElementById('decrement');
+    const incrementNodesButton = document.getElementById('incrementNodes');
+    const decrementNodesButton = document.getElementById('decrementNodes');
+    const cpuProgress = document.getElementById('cpu-progress');
+    const memoryProgress = document.getElementById('memory-progress');
+    const cpuText = document.getElementById('cpu-text');
+    const memoryText = document.getElementById('memory-text');
+
+    // Number input handlers
+    incrementButton.addEventListener('click', () => {
+        const current = parseInt(countInput.value, 10);
+        countInput.value = Math.min(current + 1, 10);
+    });
+
+    decrementButton.addEventListener('click', () => {
+        const current = parseInt(countInput.value, 10);
+        countInput.value = Math.max(current - 1, 1);
+    });
+
+    incrementNodesButton.addEventListener('click', () => {
+        const current = parseInt(baseNodesInput.value, 10);
+        baseNodesInput.value = Math.min(current + 50, 1000);
+    });
+
+    decrementNodesButton.addEventListener('click', () => {
+        const current = parseInt(baseNodesInput.value, 10);
+        baseNodesInput.value = Math.max(current - 50, 1);
+    });
+
+    // Submit button handler
+    submitButton.addEventListener('click', async () => {
+        const count = parseInt(countInput.value, 10);
+        const baseNodes = parseInt(baseNodesInput.value, 10);
+        
+        if (count < 1 || count > 10 || isNaN(count)) {
+            alert('Please enter a valid count between 1 and 10.');
+            return;
         }
-
-        // --- List Update Function ---
-        function updateList(element, simulations, is_active) {
-            if (!element) return;
-            if (simulations.length === 0) {
-                element.innerHTML = `<p class="text-gray-500 dark:text-gray-400 italic">No ${is_active ? 'active' : 'queued'} simulations.</p>`;
-                return;
-            }
-            // Sort simulations (e.g., by node count, descending for active, ascending for queued)
-            simulations.sort((a, b) => {
-                const sortOrder = is_active ? -1 : 1;
-                return sortOrder * (a.params.node_count - b.params.node_count);
+        
+        if (baseNodes < 1 || baseNodes > 1000 || isNaN(baseNodes)) {
+            alert('Please enter a valid base node count between 1 and 1000.');
+            return;
+        }
+        
+        submitButton.disabled = true;
+        submitButton.textContent = 'Submitting...';
+        
+        try {
+            const response = await fetch('/mock_submit', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    count,
+                    base_nodes: baseNodes,
+                }),
             });
-            element.innerHTML = simulations.map(sim => formatSim(sim, is_active)).join('');
-        }
-
-        // --- Mock Form Submission ---
-        mockForm.addEventListener('submit', async (event) => {
-            event.preventDefault();
-            submitStatus.textContent = 'Submitting...';
-            const formData = new FormData(mockForm);
-            const data = {
-                count: parseInt(formData.get('count') || '5'), // Default if empty
-                base_nodes: parseInt(formData.get('base_nodes') || '100'), // Default if empty
-            };
-
-            try {
-                const response = await fetch('/mock_submit', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data),
-                });
-                if (response.ok) {
-                    submitStatus.textContent = `Submitted ${data.count} mock job(s).`;
-                } else {
-                    submitStatus.textContent = `Error: ${response.statusText}`;
-                }
-            } catch (error) {
-                console.error('Error submitting mock jobs:', error);
-                submitStatus.textContent = 'Submission failed (network error).';
+            
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
             }
-            // Clear status after 3 seconds
-            setTimeout(() => { submitStatus.textContent = ''; }, 3000);
-        });
-
-        // --- Server-Sent Events --- 
-        function connectSSE() {
-             console.log("Connecting to SSE stream at /status-stream");
-             const evtSource = new EventSource("/status-stream");
-
-             evtSource.onmessage = function(event) {
-                // console.log("SSE message received:", event.data);
-                try {
-                    const message = JSON.parse(event.data);
-                    if (message.type === 'QueueUpdated') {
-                        updateList(queuedList, message.data, false);
-                    } else if (message.type === 'ActiveUpdated') {
-                        updateList(activeList, message.data, true);
-                    }
-                } catch (e) {
-                    console.error("Failed to parse SSE message:", e);
-                }
-             };
-
-             evtSource.onerror = function(err) {
-                console.error("EventSource failed:", err);
-                if (queuedList) queuedList.innerHTML = `<p class="text-red-500 italic">Error connecting to status stream. Retrying...</p>`;
-                if (activeList) activeList.innerHTML = `<p class="text-red-500 italic">Error connecting to status stream. Retrying...</p>`;
-                // EventSource automatically retries, but we might close and restart after backoff
-                evtSource.close();
-                setTimeout(connectSSE, 5000); // Retry connection after 5 seconds
-             };
-
-             evtSource.onopen = function() {
-                console.log("SSE connection opened.");
-                // Clear any previous error messages and request initial state again (optional)
-                if (queuedList) queuedList.innerHTML = `<p class="text-gray-500 dark:text-gray-400 italic">Connected. Waiting for data...</p>`;
-                if (activeList) activeList.innerHTML = `<p class="text-gray-500 dark:text-gray-400 italic">Connected. Waiting for data...</p>`;
-             };
-
-             // Clean up on page unload
-             window.addEventListener('beforeunload', () => evtSource.close());
+            
+            submitButton.textContent = 'Success!';
+            setTimeout(() => {
+                submitButton.disabled = false;
+                submitButton.textContent = 'Submit';
+            }, 1000);
+        } catch (error) {
+            console.error('Error submitting mock simulations:', error);
+            submitButton.textContent = 'Error!';
+            setTimeout(() => {
+                submitButton.disabled = false;
+                submitButton.textContent = 'Submit';
+            }, 1000);
         }
+    });
 
-        // Initial connection
-        connectSSE();
+    // Format a queue item for display
+    function formatQueueItem(item) {
+        return `
+            <div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4">
+                <h3 class="font-medium text-white">${item.params.chart} (${item.params.node_count} nodes, ${item.params.duration_mins} min)</h3>
+                <p class="text-gray-300">Predicted Cost: CPU: <span class="font-semibold">${item.predicted_cost.cpu_cores.toFixed(2)}</span> cores | Mem: <span class="font-semibold">${item.predicted_cost.memory_gb.toFixed(2)}</span> GB</p>
+                <p class="text-gray-400 text-xs mt-1">ID: ${item.request_id}</p>
+            </div>
+        `;
+    }
 
-    </script>
-</body>
-</html> 
+    // Format an active item for display
+    function formatActiveItem(item) {
+        return `
+            <div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4">
+                <h3 class="font-medium text-white">${item.params.chart} (${item.params.node_count} nodes, ${item.params.duration_mins} min)</h3>
+                <p class="text-gray-300">Actual Cost: CPU: <span class="font-semibold">${item.actual_cost.cpu_cores.toFixed(2)}</span> cores | Mem: <span class="font-semibold">${item.actual_cost.memory_gb.toFixed(2)}</span> GB</p>
+                <p class="text-gray-400 text-xs">Predicted: ${item.predicted_cost.cpu_cores.toFixed(2)} / ${item.predicted_cost.memory_gb.toFixed(2)}</p>
+                <p class="text-gray-400 text-xs mt-1">ID: ${item.simulation_id}</p>
+            </div>
+        `;
+    }
+
+    // Format the last finished simulation for display
+    function formatLastFinishedItem(item) {
+        // Format the timestamp
+        const finishedDate = new Date(item.finished_at);
+        const formattedDate = finishedDate.toLocaleString();
+        
+        return `
+            <div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4">
+                <h3 class="font-medium text-white">${item.params.chart} (${item.params.node_count} nodes, ${item.params.duration_mins} min)</h3>
+                <p class="text-gray-300">Final Cost: CPU: <span class="font-semibold">${item.actual_cost.cpu_cores.toFixed(2)}</span> cores | Mem: <span class="font-semibold">${item.actual_cost.memory_gb.toFixed(2)}</span> GB</p>
+                <p class="text-gray-400 text-xs">Predicted: ${item.predicted_cost.cpu_cores.toFixed(2)} / ${item.predicted_cost.memory_gb.toFixed(2)}</p>
+                <p class="text-gray-300 text-sm mt-2">Completed: ${formattedDate}</p>
+                <p class="text-gray-400 text-xs mt-1">ID: ${item.simulation_id}</p>
+            </div>
+        `;
+    }
+
+    // Update the cluster utilization display
+    function updateUtilization(utilization) {
+        // Update CPU usage
+        const cpuPercent = utilization.cpu_percent.toFixed(1);
+        cpuProgress.style.width = `${cpuPercent}%`;
+        cpuText.textContent = `${utilization.used_cpu_cores.toFixed(1)} / ${utilization.total_cpu_cores.toFixed(1)} cores (${cpuPercent}%)`;
+        
+        // Update memory usage
+        const memPercent = utilization.memory_percent.toFixed(1);
+        memoryProgress.style.width = `${memPercent}%`;
+        memoryText.textContent = `${utilization.used_memory_gb.toFixed(1)} / ${utilization.total_memory_gb.toFixed(1)} GB (${memPercent}%)`;
+        
+        // Add color coding based on utilization
+        if (utilization.cpu_percent > 80) {
+            cpuProgress.classList.remove('bg-blue-600', 'bg-yellow-500', 'bg-blue-400');
+            cpuProgress.classList.add('bg-red-600');
+        } else if (utilization.cpu_percent > 50) {
+            cpuProgress.classList.remove('bg-blue-600', 'bg-red-600', 'bg-blue-400');
+            cpuProgress.classList.add('bg-yellow-500');
+        } else {
+            cpuProgress.classList.remove('bg-yellow-500', 'bg-red-600', 'bg-blue-600');
+            cpuProgress.classList.add('bg-blue-400');
+        }
+        
+        if (utilization.memory_percent > 80) {
+            memoryProgress.classList.remove('bg-purple-600', 'bg-yellow-500', 'bg-purple-400');
+            memoryProgress.classList.add('bg-red-600');
+        } else if (utilization.memory_percent > 50) {
+            memoryProgress.classList.remove('bg-purple-600', 'bg-red-600', 'bg-purple-400');
+            memoryProgress.classList.add('bg-yellow-500');
+        } else {
+            memoryProgress.classList.remove('bg-yellow-500', 'bg-red-600', 'bg-purple-600');
+            memoryProgress.classList.add('bg-purple-400');
+        }
+    }
+
+    // Setup EventSource for server-sent events
+    const evtSource = new EventSource("/status-stream");
+    
+    evtSource.onopen = () => {
+        console.log("SSE connection established");
+    };
+    
+    evtSource.onerror = (error) => {
+        console.error("SSE connection error:", error);
+    };
+    
+    evtSource.addEventListener("message", (event) => {
+        const data = JSON.parse(event.data);
+        console.log("SSE message received:", data);
+        
+        // Handle different event types
+        if (data.type === "QueueUpdated") {
+            // Update queue display
+            const queueItems = data.data;
+            queueContainer.innerHTML = queueItems.length === 0 
+                ? '<div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4 text-gray-300">No simulations in queue</div>' 
+                : queueItems.map(formatQueueItem).join('');
+        } else if (data.type === "ActiveUpdated") {
+            // Update active simulations display
+            const activeItems = data.data;
+            activeContainer.innerHTML = activeItems.length === 0 
+                ? '<div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4 text-gray-300">No active simulations</div>' 
+                : activeItems.map(formatActiveItem).join('');
+        } else if (data.type === "LastFinished") {
+            // Update last finished simulation display
+            const lastFinished = data.data;
+            noFinishedElement.style.display = 'none';
+            const lastFinishedHTML = formatLastFinishedItem(lastFinished);
+            
+            // Check if there's already a finished simulation displayed
+            const existingFinished = lastFinishedContainer.querySelector('div:not(#no-finished)');
+            if (existingFinished) {
+                existingFinished.outerHTML = lastFinishedHTML;
+            } else {
+                lastFinishedContainer.innerHTML = lastFinishedHTML;
+            }
+        } else if (data.type === "ClusterUtilizationUpdated") {
+            // Update cluster utilization display
+            updateUtilization(data.data);
+        }
+    });
+</script>
+{% endblock %} 

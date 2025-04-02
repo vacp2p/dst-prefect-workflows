@@ -19,10 +19,11 @@ use uuid::Uuid;
 use futures::stream::{self, Stream, StreamExt};
 use rand::Rng;
 use axum::http::StatusCode;
-use sqlx::{migrate::MigrateDatabase, Sqlite, SqlitePool, FromRow};
+use sqlx::{migrate::MigrateDatabase, Sqlite, SqlitePool, FromRow, Row};
 use dotenvy::dotenv;
 use std::env;
 use axum::debug_handler;
+use chrono::{DateTime, Utc};
 
 // --- Data Structures ---
 
@@ -39,17 +40,54 @@ impl SimulationParams {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, FromRow)]
-pub struct ResourceCost {
+#[derive(Serialize, Deserialize, Debug, Clone, FromRow)]
+struct ResourceCost {
     #[sqlx(rename = "cpu_cores")]
-    pub cpu_cores: f32,
+    cpu_cores: f32,
     #[sqlx(rename = "memory_gb")]
-    pub memory_gb: f32,
+    memory_gb: f32,
 }
 
+#[derive(Serialize, Debug, Clone)]
+struct ClusterUtilization {
+    cpu_percent: f32,
+    memory_percent: f32,
+    total_cpu_cores: f32,
+    total_memory_gb: f32,
+    used_cpu_cores: f32,
+    used_memory_gb: f32,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct LastFinishedSimulation {
+    simulation_id: Uuid,
+    params: SimulationParams,
+    predicted_cost: ResourceCost,
+    actual_cost: ResourceCost,
+    finished_at: chrono::DateTime<chrono::Utc>,
+}
+
+// Default implementation for ResourceCost
 impl Default for ResourceCost {
     fn default() -> Self {
-        Self { cpu_cores: 0.0, memory_gb: 0.0 }
+        Self {
+            cpu_cores: 0.0,
+            memory_gb: 0.0,
+        }
+    }
+}
+
+// Default implementation for ClusterUtilization
+impl Default for ClusterUtilization {
+    fn default() -> Self {
+        Self {
+            cpu_percent: 0.0,
+            memory_percent: 0.0,
+            total_cpu_cores: 32.0, // Default values for mock K8s cluster
+            total_memory_gb: 128.0,
+            used_cpu_cores: 0.0,
+            used_memory_gb: 0.0,
+        }
     }
 }
 
@@ -68,14 +106,37 @@ pub struct ActiveSimulation {
     pub actual_cost: ResourceCost,
 }
 
-// Events to broadcast via SSE
-#[derive(Serialize, Clone, Debug)]
-#[serde(tag = "type", content = "data")]
-pub enum AppEvent {
-    QueueUpdated(Vec<QueuedSimulation>),
-    ActiveUpdated(Vec<ActiveSimulation>),
+// Add struct for history entries
+#[derive(Serialize, FromRow, Debug, Clone)]
+pub struct CostHistoryEntry {
+    chart: String,
+    node_count: u32,
+    duration_mins: u32,
+    cpu_cores: f32,
+    memory_gb: f32,
+    observed_at: DateTime<Utc>,
 }
 
+// Events to broadcast via SSE
+#[derive(Serialize, Debug, Clone)]
+#[serde(tag = "type", content = "data")]
+enum AppEvent {
+    QueueUpdated(Vec<QueuedSimulation>),
+    ActiveUpdated(Vec<ActiveSimulation>),
+    LastFinished(LastFinishedSimulation),
+    ClusterUtilizationUpdated(ClusterUtilization),
+}
+
+// Add this with other structs
+#[derive(Serialize, Debug)]
+struct HistoryEntry {
+    chart: String,
+    node_count: i64,
+    duration_mins: i64,
+    cpu_cores: f64,
+    memory_gb: f64,
+    observed_at: chrono::DateTime<chrono::Utc>,
+}
 
 // --- Application State ---
 
@@ -84,6 +145,8 @@ struct AppState {
     templates: Arc<Mutex<AutoReloader>>,
     queued_simulations: Arc<Mutex<VecDeque<QueuedSimulation>>>,
     active_simulations: Arc<Mutex<HashMap<Uuid, ActiveSimulation>>>,
+    last_finished_simulation: Arc<Mutex<Option<LastFinishedSimulation>>>,
+    cluster_utilization: Arc<Mutex<ClusterUtilization>>,
     db_pool: SqlitePool,
     event_sender: broadcast::Sender<AppEvent>,
 }
@@ -129,12 +192,25 @@ async fn sse_handler(
     let initial_queue_deque = state.queued_simulations.lock().await;
     let initial_queue_vec: Vec<QueuedSimulation> = initial_queue_deque.iter().cloned().collect(); // Convert to Vec
     drop(initial_queue_deque); // Drop lock
+    
     let initial_active = state.active_simulations.lock().await.values().cloned().collect();
+    
+    let initial_last_finished = state.last_finished_simulation.lock().await.clone();
+    let initial_utilization = state.cluster_utilization.lock().await.clone();
 
-    let initial_stream = stream::iter(vec![
-        Ok(Event::default().json_data(AppEvent::QueueUpdated(initial_queue_vec)).unwrap()), // Use the Vec
+    // Create a vector to hold all initial events
+    let mut initial_events = vec![
+        Ok(Event::default().json_data(AppEvent::QueueUpdated(initial_queue_vec)).unwrap()),
         Ok(Event::default().json_data(AppEvent::ActiveUpdated(initial_active)).unwrap()),
-    ]);
+        Ok(Event::default().json_data(AppEvent::ClusterUtilizationUpdated(initial_utilization)).unwrap()),
+    ];
+    
+    // Add last finished simulation event if available
+    if let Some(last_finished) = initial_last_finished {
+        initial_events.push(Ok(Event::default().json_data(AppEvent::LastFinished(last_finished)).unwrap()));
+    }
+
+    let initial_stream = stream::iter(initial_events);
 
     // Create the main stream that listens for broadcast updates
     let broadcast_stream = async_stream::stream! {
@@ -252,6 +328,74 @@ async fn mock_submit_handler(
     StatusCode::OK
 }
 
+// History Page Handler
+#[cfg(debug_assertions)]
+async fn history_handler_debug(State(state): State<AppState>) -> impl IntoResponse {
+    let reloader = state.templates.lock().await;
+    let env = reloader.acquire_env().unwrap();
+    let tmpl = env.get_template("history.html.j2").unwrap();
+    // The actual history data is loaded via JavaScript from the /api/history endpoint
+    Html(tmpl.render(context! {}).unwrap()).into_response()
+}
+
+#[cfg(not(debug_assertions))]
+async fn history_handler_release(State(state): State<AppState>) -> impl IntoResponse {
+    let reloader = state.templates.lock().await;
+    let env = reloader.acquire_env().unwrap();
+    let tmpl = env.get_template("history.html.j2").unwrap();
+    Html(tmpl.render(context! {}).unwrap()).into_response()
+}
+
+// API History Handler - Returns JSON data of simulation history
+async fn api_history_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let db_pool = &state.db_pool;
+    
+    // Run SQL query to get history from cost_history table
+    let result = sqlx::query(
+        r#"
+        SELECT 
+            chart, 
+            node_count, 
+            duration_mins,
+            cpu_cores, 
+            memory_gb, 
+            observed_at
+        FROM cost_history
+        ORDER BY observed_at DESC
+        LIMIT 100
+        "#
+    )
+    .fetch_all(db_pool)
+    .await
+    .map(|rows| {
+        rows.iter().map(|row| {
+            HistoryEntry {
+                chart: row.get("chart"),
+                node_count: row.get("node_count"),
+                duration_mins: row.get("duration_mins"),
+                cpu_cores: row.get("cpu_cores"),
+                memory_gb: row.get("memory_gb"),
+                observed_at: chrono::DateTime::parse_from_rfc3339(&row.get::<String, _>("observed_at"))
+                    .unwrap_or_default()
+                    .with_timezone(&chrono::Utc),
+            }
+        }).collect::<Vec<HistoryEntry>>()
+    });
+
+    match result {
+        Ok(entries) => {
+            // Return JSON response
+            Json(entries).into_response()
+        },
+        Err(err) => {
+            // Log the error
+            tracing::error!("Failed to fetch history data: {}", err);
+            // Return empty array with 500 status
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(Vec::<HistoryEntry>::new())).into_response()
+        }
+    }
+}
+
 // --- Main Function ---
 
 #[tokio::main]
@@ -307,6 +451,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         templates: Arc::new(Mutex::new(templates_reloader)),
         queued_simulations: Arc::new(Mutex::new(VecDeque::new())),
         active_simulations: Arc::new(Mutex::new(HashMap::new())),
+        last_finished_simulation: Arc::new(Mutex::new(None)),
+        cluster_utilization: Arc::new(Mutex::new(ClusterUtilization::default())),
         db_pool,
         event_sender,
     };
@@ -375,12 +521,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     mock_completion_timers.remove(&id);
                     tracing::info!(simulation_id = %id, "Mock simulation completed");
                     active_updated = true;
+                    
+                    // Update last finished simulation
+                    let last_finished = LastFinishedSimulation {
+                        simulation_id: id,
+                        params: completed_sim.params.clone(),
+                        predicted_cost: completed_sim.predicted_cost.clone(),
+                        actual_cost: completed_sim.actual_cost.clone(),
+                        finished_at: chrono::Utc::now(),
+                    };
+                    
+                    // Update last finished simulation in state
+                    *scheduler_state.last_finished_simulation.lock().await = Some(last_finished.clone());
+                    
+                    // Broadcast last finished simulation update
+                    let _ = scheduler_state.event_sender.send(AppEvent::LastFinished(last_finished));
+                    
                     // Collect data needed for DB insert
                     completed_sim_data.push((completed_sim.params.clone(), completed_sim.actual_cost.clone()));
                 }
             }
             // --- Drop active_sims lock before potential DB operations ---
             drop(active_sims);
+
+            // --- Update cluster utilization ---
+            {
+                let active_sims = scheduler_state.active_simulations.lock().await;
+                let mut util = scheduler_state.cluster_utilization.lock().await;
+                
+                // Calculate total resource usage from active simulations
+                let mut total_cpu = 0.0;
+                let mut total_memory = 0.0;
+                
+                for sim in active_sims.values() {
+                    total_cpu += sim.actual_cost.cpu_cores;
+                    total_memory += sim.actual_cost.memory_gb;
+                }
+                
+                // Update utilization metrics
+                util.used_cpu_cores = total_cpu;
+                util.used_memory_gb = total_memory;
+                util.cpu_percent = (total_cpu / util.total_cpu_cores) * 100.0;
+                util.memory_percent = (total_memory / util.total_memory_gb) * 100.0;
+                
+                // Broadcast utilization update
+                let _ = scheduler_state.event_sender.send(AppEvent::ClusterUtilizationUpdated(util.clone()));
+            }
 
             // --- Store final costs in DB (using runtime-checked query) ---
             for (params, cost) in completed_sim_data {
@@ -454,13 +640,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(root_handler_release)
         )
         // --- API Routes ---
-        // .route("/request_run", post(request_run_handler)) // TODO
-        // .route("/simulation_complete", post(simulation_complete_handler)) // TODO
+        .route("/api/history", get(api_history_handler))
         .route("/status-stream", get(sse_handler))
         // --- Mocking Routes ---
         .route("/mock_submit", post(mock_submit_handler))
         // --- Static Files & State ---
         .nest_service("/static", ServeDir::new("static"))
+        // Add history page route
+        .route("/history",
+            #[cfg(debug_assertions)]
+            get(history_handler_debug),
+            #[cfg(not(debug_assertions))]
+            get(history_handler_release)
+        )
         .with_state(state.clone())
         .layer(
             TraceLayer::new_for_http()
