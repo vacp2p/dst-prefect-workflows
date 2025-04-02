@@ -1,54 +1,117 @@
 <!doctype html>
-<html lang="en">
+{# Use theme detection script - Apply dark mode immediately to prevent flash #}
+<html lang="en" class="no-js"> {# Add no-js initially #}
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LARS - Lab Automated Resource Scheduler</title>
-    <link href="/static/output.css" rel="stylesheet">
-    {# Include the LiveReload script if provided by Axum layer #}
-    {% if live_reload_script is defined %}
-        {{ live_reload_script|safe }}
-    {% endif %}
-</head>
-<body class="bg-gray-100 text-gray-800 font-sans">
-    <div class="container mx-auto p-6">
-        <h1 class="text-4xl font-bold mb-6 text-gray-700">LARS Dashboard</h1>
+    <link rel="icon" href="/static/favicon.ico" type="image/x-icon"> {# Add favicon link #}
 
-        <!-- Mock Submission Form -->
-        <div class="mb-6 bg-white p-4 rounded-lg shadow">
-            <h2 class="text-xl font-semibold mb-3 text-gray-600">Submit Mock Simulations</h2>
-            <form id="mock-submit-form" class="flex items-end space-x-3">
+    {# Theme initialization script (adapted from Dragonfly) #}
+    <script>
+        (function() {
+            // Use localStorage first, then system preference
+            const theme = localStorage.getItem('theme') || 'system';
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const shouldBeDark = theme === 'dark' || (theme === 'system' && prefersDark);
+
+            // Apply theme immediately
+            if (shouldBeDark) {
+                document.documentElement.classList.add('dark');
+            } else {
+                document.documentElement.classList.remove('dark');
+            }
+            // Set data-theme attribute
+            document.documentElement.setAttribute('data-theme', theme);
+
+            // Make page visible now that theme is potentially applied
+            document.documentElement.classList.remove('no-js');
+            // Ensure display is set (might be redundant if no-js rule handles it)
+            // document.documentElement.style.display = 'block';
+        })();
+    </script>
+
+    {# Inter font from Google Fonts #}
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    {# Link to compiled Tailwind CSS #}
+    <link href="/static/output.css" rel="stylesheet">
+
+    {# Style to hide elements during Alpine/JS init #}
+    <style>
+        [x-cloak] { display: none !important; }
+        /* Prevent flash of unstyled content */
+        html.no-js { display: none; }
+    </style>
+
+    {# Include LiveReload script if provided (debug builds) #}
+    {# The LiveReloadLayer injects this automatically, no need for template var #}
+
+</head>
+{# Add dark mode base classes and Inter font #}
+<body class="font-sans antialiased bg-gray-100 text-gray-900 dark:bg-gray-900 dark:text-gray-200 min-h-screen flex flex-col">
+
+    {# Basic Navbar Placeholder #}
+    <nav class="bg-white dark:bg-gray-800 shadow-md sticky top-0 z-10">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <span class="text-2xl font-bold text-indigo-600 dark:text-indigo-400">LARS</span>
+                </div>
+                {# Add theme toggle button later if needed #}
+            </div>
+        </div>
+    </nav>
+
+    {# Main Content Area #}
+    <main class="flex-grow container mx-auto p-6">
+        <h1 class="text-3xl font-bold mb-6 text-gray-800 dark:text-gray-100">LARS Dashboard</h1>
+
+        {# Mock Submission Form Card #}
+        <div class="mb-8 bg-white dark:bg-gray-800 p-5 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700">
+            <h2 class="text-xl font-semibold mb-4 text-gray-700 dark:text-gray-200">Submit Mock Simulations</h2>
+            <form id="mock-submit-form" class="flex flex-wrap items-end gap-4">
                 <div>
-                    <label for="mock-count" class="block text-sm font-medium text-gray-700">Number to Add:</label>
-                    <input type="number" id="mock-count" name="count" value="5" min="1" max="50" class="mt-1 block w-24 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                    <label for="mock-count" class="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-1">Number to Add:</label>
+                    <input type="number" id="mock-count" name="count" value="5" min="1" max="50" class="block w-28 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                 </div>
                 <div>
-                    <label for="mock-nodes" class="block text-sm font-medium text-gray-700">Base Nodes:</label>
-                    <input type="number" id="mock-nodes" name="base_nodes" value="100" min="10" max="1000" step="10" class="mt-1 block w-24 px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                    <label for="mock-nodes" class="block text-sm font-medium text-gray-600 dark:text-gray-300 mb-1">Base Nodes:</label>
+                    <input type="number" id="mock-nodes" name="base_nodes" value="100" min="10" max="1000" step="10" class="block w-28 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
                 </div>
-                <button type="submit" class="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Submit</button>
+                <button type="submit" class="self-end inline-flex justify-center py-2 px-5 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 focus:ring-offset-gray-100 dark:focus:ring-offset-gray-900 transition duration-150 ease-in-out">Submit</button>
             </form>
-             <p id="submit-status" class="text-sm text-gray-500 mt-2"></p>
+            <p id="submit-status" class="text-sm text-gray-500 dark:text-gray-400 mt-3 h-4"></p> {# Reserve height #}
         </div>
 
-        <!-- Simulation Lists -->
+        {# Simulation Lists Grid #}
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div>
-                <h2 class="text-2xl font-semibold mb-3 text-gray-600">Queued Simulations</h2>
-                <div id="queued-simulations" class="bg-white p-4 rounded-lg shadow space-y-3 min-h-[100px]">
-                    <p class="text-gray-500 italic">Waiting for data...</p>
+                <h2 class="text-2xl font-semibold mb-4 text-gray-700 dark:text-gray-200">Queued Simulations</h2>
+                <div id="queued-simulations" class="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-lg space-y-3 min-h-[150px] border border-gray-200 dark:border-gray-700">
+                    <p class="text-gray-500 dark:text-gray-400 italic">Waiting for data...</p>
                 </div>
             </div>
 
             <div>
-                <h2 class="text-2xl font-semibold mb-3 text-gray-600">Active Simulations</h2>
-                <div id="active-simulations" class="bg-white p-4 rounded-lg shadow space-y-3 min-h-[100px]">
-                    <p class="text-gray-500 italic">Waiting for data...</p>
+                <h2 class="text-2xl font-semibold mb-4 text-gray-700 dark:text-gray-200">Active Simulations</h2>
+                <div id="active-simulations" class="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-lg space-y-3 min-h-[150px] border border-gray-200 dark:border-gray-700">
+                    <p class="text-gray-500 dark:text-gray-400 italic">Waiting for data...</p>
                 </div>
             </div>
         </div>
+    </main>
 
-    </div>
+    {# Basic Footer Placeholder #}
+    <footer class="bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 mt-8 py-4">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <p class="text-center text-sm text-gray-500 dark:text-gray-400">
+                LARS - Lab Automated Resource Scheduler
+            </p>
+        </div>
+    </footer>
 
     <script>
         const queuedList = document.getElementById('queued-simulations');
@@ -56,31 +119,45 @@
         const mockForm = document.getElementById('mock-submit-form');
         const submitStatus = document.getElementById('submit-status');
 
+        // --- Simulation Card Renderer ---
         function formatSim(sim, is_active = false) {
             const cost = is_active ? sim.actual_cost : sim.predicted_cost;
             const pred_cost = sim.predicted_cost;
             const id = is_active ? sim.simulation_id : sim.request_id;
 
-            let costHtml = `CPU: ${cost.cpu_cores.toFixed(2)} cores | Mem: ${cost.memory_gb.toFixed(2)} GB`;
+            // Format costs with 2 decimal places
+            const cpuActual = cost.cpu_cores.toFixed(2);
+            const memActual = cost.memory_gb.toFixed(2);
+            const cpuPred = pred_cost.cpu_cores.toFixed(2);
+            const memPred = pred_cost.memory_gb.toFixed(2);
+
+            let costHtml = `CPU: <span class="font-semibold">${cpuActual}</span> cores | Mem: <span class="font-semibold">${memActual}</span> GB`;
             if (is_active) {
-                costHtml += ` <span class="text-xs text-gray-500">(Pred: ${pred_cost.cpu_cores.toFixed(2)} / ${pred_cost.memory_gb.toFixed(2)})</span>`;
+                // Show predicted cost in parentheses for active simulations
+                costHtml += ` <span class="text-xs text-gray-500 dark:text-gray-400">(Pred: ${cpuPred} / ${memPred})</span>`;
             }
 
             return `
-                <div class="border border-gray-200 p-3 rounded bg-gray-50" data-id="${id}">
-                    <p class="font-medium text-gray-700">${sim.params.chart} (${sim.params.node_count} nodes, ${sim.params.duration_mins} min)</p>
-                    <p class="text-sm text-gray-600">Cost: ${costHtml}</p>
-                    <p class="text-xs text-gray-400">ID: ${id}</p>
+                <div class="border border-gray-200 dark:border-gray-700 p-3 rounded-md bg-gray-50 dark:bg-gray-700/50 shadow-sm" data-id="${id}">
+                    <p class="font-medium text-gray-800 dark:text-gray-100">${sim.params.chart} (<span class="font-normal">${sim.params.node_count} nodes, ${sim.params.duration_mins} min</span>)</p>
+                    <p class="text-sm text-gray-600 dark:text-gray-300 mt-1">${is_active ? 'Actual' : 'Predicted'} Cost: ${costHtml}</p>
+                    <p class="text-xs text-gray-400 dark:text-gray-500 mt-1 font-mono">ID: ${id}</p>
                 </div>
             `;
         }
 
+        // --- List Update Function ---
         function updateList(element, simulations, is_active) {
             if (!element) return;
             if (simulations.length === 0) {
-                element.innerHTML = `<p class="text-gray-500 italic">No ${is_active ? 'active' : 'queued'} simulations.</p>`;
+                element.innerHTML = `<p class="text-gray-500 dark:text-gray-400 italic">No ${is_active ? 'active' : 'queued'} simulations.</p>`;
                 return;
             }
+            // Sort simulations (e.g., by node count, descending for active, ascending for queued)
+            simulations.sort((a, b) => {
+                const sortOrder = is_active ? -1 : 1;
+                return sortOrder * (a.params.node_count - b.params.node_count);
+            });
             element.innerHTML = simulations.map(sim => formatSim(sim, is_active)).join('');
         }
 
@@ -90,63 +167,70 @@
             submitStatus.textContent = 'Submitting...';
             const formData = new FormData(mockForm);
             const data = {
-                count: parseInt(formData.get('count')),
-                base_nodes: parseInt(formData.get('base_nodes')),
+                count: parseInt(formData.get('count') || '5'), // Default if empty
+                base_nodes: parseInt(formData.get('base_nodes') || '100'), // Default if empty
             };
 
             try {
                 const response = await fetch('/mock_submit', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(data),
                 });
                 if (response.ok) {
-                    submitStatus.textContent = `Successfully submitted ${data.count} mock jobs.`;
-                    // Clear status after a few seconds
-                    setTimeout(() => { submitStatus.textContent = ''; }, 3000);
+                    submitStatus.textContent = `Submitted ${data.count} mock job(s).`;
                 } else {
-                     submitStatus.textContent = `Error: ${response.statusText}`;
+                    submitStatus.textContent = `Error: ${response.statusText}`;
                 }
             } catch (error) {
                 console.error('Error submitting mock jobs:', error);
-                submitStatus.textContent = 'Submission failed.';
+                submitStatus.textContent = 'Submission failed (network error).';
             }
+            // Clear status after 3 seconds
+            setTimeout(() => { submitStatus.textContent = ''; }, 3000);
         });
 
         // --- Server-Sent Events --- 
-        console.log("Connecting to SSE stream at /status-stream");
-        const evtSource = new EventSource("/status-stream");
+        function connectSSE() {
+             console.log("Connecting to SSE stream at /status-stream");
+             const evtSource = new EventSource("/status-stream");
 
-        evtSource.onmessage = function(event) {
-            console.log("SSE message received:", event.data);
-            try {
-                const message = JSON.parse(event.data);
-                if (message.type === 'QueueUpdated') {
-                    console.log("Queue Updated:", message.data);
-                    updateList(queuedList, message.data, false);
-                } else if (message.type === 'ActiveUpdated') {
-                    console.log("Active Updated:", message.data);
-                    updateList(activeList, message.data, true);
+             evtSource.onmessage = function(event) {
+                // console.log("SSE message received:", event.data);
+                try {
+                    const message = JSON.parse(event.data);
+                    if (message.type === 'QueueUpdated') {
+                        updateList(queuedList, message.data, false);
+                    } else if (message.type === 'ActiveUpdated') {
+                        updateList(activeList, message.data, true);
+                    }
+                } catch (e) {
+                    console.error("Failed to parse SSE message:", e);
                 }
-            } catch (e) {
-                console.error("Failed to parse SSE message:", e);
-            }
-        };
+             };
 
-        evtSource.onerror = function(err) {
-            console.error("EventSource failed:", err);
-            queuedList.innerHTML = `<p class="text-red-500 italic">Error connecting to status stream.</p>`;
-            activeList.innerHTML = `<p class="text-red-500 italic">Error connecting to status stream.</p>`;
-            // Optionally try to reconnect?
-            // evtSource.close(); // Close to prevent constant retries if server is down
-        };
+             evtSource.onerror = function(err) {
+                console.error("EventSource failed:", err);
+                if (queuedList) queuedList.innerHTML = `<p class="text-red-500 italic">Error connecting to status stream. Retrying...</p>`;
+                if (activeList) activeList.innerHTML = `<p class="text-red-500 italic">Error connecting to status stream. Retrying...</p>`;
+                // EventSource automatically retries, but we might close and restart after backoff
+                evtSource.close();
+                setTimeout(connectSSE, 5000); // Retry connection after 5 seconds
+             };
 
-         evtSource.onopen = function() {
-            console.log("SSE connection opened.");
-            // Optionally clear any previous error messages
-        };
+             evtSource.onopen = function() {
+                console.log("SSE connection opened.");
+                // Clear any previous error messages and request initial state again (optional)
+                if (queuedList) queuedList.innerHTML = `<p class="text-gray-500 dark:text-gray-400 italic">Connected. Waiting for data...</p>`;
+                if (activeList) activeList.innerHTML = `<p class="text-gray-500 dark:text-gray-400 italic">Connected. Waiting for data...</p>`;
+             };
+
+             // Clean up on page unload
+             window.addEventListener('beforeunload', () => evtSource.close());
+        }
+
+        // Initial connection
+        connectSSE();
 
     </script>
 </body>
