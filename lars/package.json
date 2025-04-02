@@ -1,0 +1,16 @@
+{
+  "name": "lars",
+  "version": "1.0.0",
+  "description": "LARS (Lab Automated Resource Scheduler) is a service designed to intelligently manage and schedule simulation workloads within the lab environment.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.0",
+    "tailwindcss": "^4.1.0"
+  }
+}

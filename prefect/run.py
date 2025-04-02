@@ -152,28 +152,31 @@ def parse_and_generate_matrix(valid_issue_encoded: str):
             for d in durations:
                 for docker_image in docker_images:
                     if publisher_enabled:
-                        # Only generate entries for the specific test cases we want
-                        matrix.append({
-                            "index": i,
-                            "issue_number": issue_number,
-                            "chart": "waku",
-                            "nodecount": n,
-                            "duration": d,
-                            "bootstrap_nodes": bootstrap_nodes,
-                            "docker_image": docker_image,
-                            "pubsub_topic": pubsub_topic,
-                            "publisher_enabled": publisher_enabled,
-                            "publisher_message_size": 1,  # Fixed at 1KB
-                            "publisher_delay": d,  # Use the duration as the delay
-                            "publisher_message_count": 600,  # Fixed at 600 messages
-                            "artificial_latency": artificial_latency,
-                            "latency_ms": latency_ms,
-                            "nodes_command": nodes_command,
-                            "bootstrap_command": bootstrap_command,
-                            "parallel_limit": parallel_limit
-                        })
-                        i += 1
-                        print(f"Generated {i} matrix entries")
+                        # If publisher is enabled, generate all combinations with publisher parameters
+                        for msg_size in publisher_message_sizes:
+                            for delay in publisher_delays:
+                                for msg_count in publisher_message_counts:
+                                    matrix.append({
+                                        "index": i,
+                                        "issue_number": issue_number,
+                                        "chart": "waku",
+                                        "nodecount": n,
+                                        "duration": d,
+                                        "bootstrap_nodes": bootstrap_nodes,
+                                        "docker_image": docker_image,
+                                        "pubsub_topic": pubsub_topic,
+                                        "publisher_enabled": publisher_enabled,
+                                        "publisher_message_size": msg_size,
+                                        "publisher_delay": delay,
+                                        "publisher_message_count": msg_count,
+                                        "artificial_latency": artificial_latency,
+                                        "latency_ms": latency_ms,
+                                        "nodes_command": nodes_command,
+                                        "bootstrap_command": bootstrap_command,
+                                        "parallel_limit": parallel_limit
+                                    })
+                                    i += 1
+                                    print(f"Generated {i} matrix entries")
                     else:
                         # If publisher is disabled, generate one entry without publisher parameters
                         matrix.append({
@@ -420,10 +423,6 @@ def deploy_config(config: dict):
         "--namespace", namespace
     ]
     
-    # Record the start time of the simulation
-    start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"Starting simulation at: {start_time}")
-    
     print(f"Running Helm command: {' '.join(helm_cmd)}")
     try:
         deploy_result = subprocess.run(helm_cmd, capture_output=True, text=True, check=True)
@@ -433,6 +432,26 @@ def deploy_config(config: dict):
         print(f"Error deploying: {e.stderr}")
         print(f"Helm output: {e.stdout}")
         raise
+
+    # Wait for StatefulSet to be ready
+    print(f"Waiting for StatefulSet {release_name}-nodes to be ready...")
+    rollout_cmd = [
+        "kubectl", "rollout", "status",
+        "--watch",
+        "--timeout=30000s",
+        f"statefulset/{release_name}-nodes",
+        "-n", namespace
+    ]
+    try:
+        rollout_result = subprocess.run(rollout_cmd, capture_output=True, text=True, check=True)
+        print(f"StatefulSet {release_name}-nodes is ready")
+    except subprocess.CalledProcessError as e:
+        print(f"Error waiting for StatefulSet: {e.stderr}")
+        raise
+    
+    # Record the start time of the simulation after StatefulSet is ready
+    start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"Starting simulation at: {start_time}")
     
     # Wait for specified duration
     duration_seconds = config.get("duration", 5) * 60

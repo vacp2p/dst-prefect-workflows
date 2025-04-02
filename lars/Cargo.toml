@@ -1,0 +1,40 @@
+[package]
+name = "lars"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["ws", "macros"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+minijinja = { version = "2.9", features = ["loader", "json"] }
+minijinja-autoreload = "2.9"
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+tower-livereload = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+kube = { version = "0.99", features = ["runtime", "derive", "client", "config"] }
+k8s-openapi = { version = "0.24", features = ["v1_28"] }
+
+prometheus-client = "0.22"
+thiserror = "1.0"
+uuid = { version = "1.7", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+sqlx = { version = "0.7", features = [ "runtime-tokio", "sqlite", "macros", "chrono", "uuid", "migrate"] }
+dotenvy = "0.15"
+
+# Optional, but often useful for config management
+# config = { version = "0.14", features = ["yaml", "json", "toml", "env"] }
+# dotenvy = "0.15"
+
+# Added for SSE stream building
+futures = "0.3"
+async-stream = "0.3"
+
+# Added for mock data generation
+rand = "0.8"
+
+[dev-dependencies]
+# Add development-specific dependencies here later if needed
+# e.g., for integration testing

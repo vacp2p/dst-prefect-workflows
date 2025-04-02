@@ -1,3 +1,4 @@
-prefect/10ksim/**
+prefect/10ksim/
 **/.env
 **/ruby.yaml
+**/target/**
