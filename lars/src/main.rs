@@ -24,12 +24,7 @@ use dotenvy::dotenv;
 use std::env;
 use axum::debug_handler;
 use chrono::{DateTime, Utc};
-use kube::{
-    api::{Api, ListParams, ResourceExt},
-    Client,
-};
-use k8s_openapi::api::core::v1::{Node, Pod};
-use futures::TryStreamExt;
+use reqwest;
 
 // --- Data Structures ---
 
@@ -209,6 +204,26 @@ impl Default for KubernetesMetrics {
             namespace_used_memory_gb: 0.0,
         }
     }
+}
+
+// Structure to hold Prometheus metrics response
+#[derive(Deserialize, Debug, Clone)]
+struct PrometheusResponse {
+    status: String,
+    data: PrometheusData,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct PrometheusData {
+    #[serde(rename = "resultType")]
+    result_type: String,
+    result: Vec<PrometheusResult>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct PrometheusResult {
+    metric: serde_json::Value,
+    value: (f64, String),  // Timestamp and value
 }
 
 // --- Application State ---
@@ -484,140 +499,140 @@ async fn api_history_handler(State(state): State<AppState>) -> impl IntoResponse
     }
 }
 
-// Function to fetch metrics from Kubernetes
-async fn fetch_kubernetes_metrics(namespace: &str) -> Result<KubernetesMetrics, kube::Error> {
-    // Initialize Kubernetes client
-    let client = Client::try_default().await?;
+// Fetch metrics from Prometheus
+async fn fetch_prometheus_metrics(namespace: &str) -> Result<KubernetesMetrics, Box<dyn std::error::Error + Send + Sync>> {
+    let prometheus_url = "https://metrics.riff.cc/select/0/prometheus/api/v1/";
+    let http_client = reqwest::Client::new();
     
-    // Get all nodes to calculate cluster capacity
-    let nodes_api: Api<Node> = Api::all(client.clone());
-    let nodes = nodes_api.list(&ListParams::default()).await?;
-    
-    // Get pods in the specified namespace
-    let pods_api: Api<Pod> = Api::namespaced(client, namespace);
-    let pods = pods_api.list(&ListParams::default()).await?;
-    
-    // Initialize metrics with defaults
+    // Initialize metrics with default values
     let mut metrics = KubernetesMetrics::default();
     metrics.namespace = namespace.to_string();
     
-    // Calculate cluster metrics from nodes
-    for node in nodes.items {
-        if let Some(status) = node.status {
-            if let Some(allocatable) = status.allocatable {
-                // Extract CPU and memory
-                if let Some(cpu_str) = allocatable.get("cpu") {
-                    if let Ok(cpu) = cpu_str.0.parse::<f32>() {
-                        metrics.cluster_total_cpu += cpu;
-                    }
-                }
-                
-                if let Some(memory_str) = allocatable.get("memory") {
-                    // Memory is typically in Ki, Mi, Gi format
-                    // For simplicity, assume it's in GB, would need proper parsing
-                    if memory_str.0.ends_with("Ki") {
-                        if let Ok(mem) = memory_str.0.trim_end_matches("Ki").parse::<f32>() {
-                            metrics.cluster_total_memory_gb += mem / (1024.0 * 1024.0);
-                        }
-                    } else if memory_str.0.ends_with("Mi") {
-                        if let Ok(mem) = memory_str.0.trim_end_matches("Mi").parse::<f32>() {
-                            metrics.cluster_total_memory_gb += mem / 1024.0;
-                        }
-                    } else if memory_str.0.ends_with("Gi") {
-                        if let Ok(mem) = memory_str.0.trim_end_matches("Gi").parse::<f32>() {
-                            metrics.cluster_total_memory_gb += mem;
-                        }
-                    }
-                }
-            }
+    // Fetch total cluster CPU capacity
+    let cluster_cpu_query = format!("{}query?query={}", prometheus_url, 
+        "sum(kube_node_status_capacity{resource=\"cpu\"})");
+    
+    let response = http_client.get(&cluster_cpu_query).send().await?;
+    let prom_response: PrometheusResponse = response.json().await?;
+    
+    if prom_response.status == "success" && !prom_response.data.result.is_empty() {
+        if let Ok(value) = prom_response.data.result[0].value.1.parse::<f32>() {
+            metrics.cluster_total_cpu = value;
+            tracing::info!("Prometheus: Cluster CPU capacity: {}", value);
         }
     }
     
-    // Calculate namespace metrics from pods
-    for pod in pods.items {
-        if let Some(status) = pod.status {
-            if status.phase.as_deref() == Some("Running") {
-                if let Some(spec) = pod.spec {
-                    for container in &spec.containers {
-                        if let Some(resources) = &container.resources {
-                            // Calculate CPU requests
-                            if let Some(requests) = &resources.requests {
-                                if let Some(cpu_str) = requests.get("cpu") {
-                                    // CPU can be in cores or millicores
-                                    let cpu_val = if cpu_str.0.ends_with("m") {
-                                        if let Ok(cpu) = cpu_str.0.trim_end_matches("m").parse::<f32>() {
-                                            cpu / 1000.0
-                                        } else {
-                                            0.0
-                                        }
-                                    } else {
-                                        cpu_str.0.parse::<f32>().unwrap_or(0.0)
-                                    };
-                                    metrics.namespace_cpu_requests += cpu_val;
-                                    // For simplicity, use requests as "used" since we can't get actual usage without metrics server
-                                    metrics.namespace_used_cpu += cpu_val;
-                                }
-                                
-                                if let Some(memory_str) = requests.get("memory") {
-                                    // Memory parsing, similar to above
-                                    if memory_str.0.ends_with("Ki") {
-                                        if let Ok(mem) = memory_str.0.trim_end_matches("Ki").parse::<f32>() {
-                                            let mem_gb = mem / (1024.0 * 1024.0);
-                                            metrics.namespace_memory_requests_gb += mem_gb;
-                                            metrics.namespace_used_memory_gb += mem_gb;
-                                        }
-                                    } else if memory_str.0.ends_with("Mi") {
-                                        if let Ok(mem) = memory_str.0.trim_end_matches("Mi").parse::<f32>() {
-                                            let mem_gb = mem / 1024.0;
-                                            metrics.namespace_memory_requests_gb += mem_gb;
-                                            metrics.namespace_used_memory_gb += mem_gb;
-                                        }
-                                    } else if memory_str.0.ends_with("Gi") {
-                                        if let Ok(mem) = memory_str.0.trim_end_matches("Gi").parse::<f32>() {
-                                            metrics.namespace_memory_requests_gb += mem;
-                                            metrics.namespace_used_memory_gb += mem;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    // Fetch total cluster memory capacity (in GB)
+    let cluster_mem_query = format!("{}query?query={}", prometheus_url, 
+        "sum(kube_node_status_capacity{resource=\"memory\"}) / 1024 / 1024 / 1024");
+    
+    let response = http_client.get(&cluster_mem_query).send().await?;
+    let prom_response: PrometheusResponse = response.json().await?;
+    
+    if prom_response.status == "success" && !prom_response.data.result.is_empty() {
+        if let Ok(value) = prom_response.data.result[0].value.1.parse::<f32>() {
+            metrics.cluster_total_memory_gb = value;
+            tracing::info!("Prometheus: Cluster memory capacity: {} GB", value);
         }
     }
     
-    // For cluster used metrics, we'll just simulate for demo purposes
-    // In a real system, you'd get this from metrics-server or prometheus
-    metrics.cluster_used_cpu = metrics.namespace_used_cpu + (metrics.cluster_total_cpu * 0.25); // 25% base + namespace
-    metrics.cluster_used_memory_gb = metrics.namespace_used_memory_gb + (metrics.cluster_total_memory_gb * 0.3); // 30% base + namespace
+    // Fetch cluster CPU usage
+    let cluster_cpu_usage_query = format!("{}query?query={}", prometheus_url, 
+        "sum(rate(container_cpu_usage_seconds_total[5m]))");
+    
+    let response = http_client.get(&cluster_cpu_usage_query).send().await?;
+    let prom_response: PrometheusResponse = response.json().await?;
+    
+    if prom_response.status == "success" && !prom_response.data.result.is_empty() {
+        if let Ok(value) = prom_response.data.result[0].value.1.parse::<f32>() {
+            metrics.cluster_used_cpu = value;
+            tracing::info!("Prometheus: Cluster CPU usage: {}", value);
+        }
+    }
+    
+    // Fetch cluster memory usage (in GB)
+    let cluster_mem_usage_query = format!("{}query?query={}", prometheus_url, 
+        "sum(container_memory_working_set_bytes) / 1024 / 1024 / 1024");
+    
+    let response = http_client.get(&cluster_mem_usage_query).send().await?;
+    let prom_response: PrometheusResponse = response.json().await?;
+    
+    if prom_response.status == "success" && !prom_response.data.result.is_empty() {
+        if let Ok(value) = prom_response.data.result[0].value.1.parse::<f32>() {
+            metrics.cluster_used_memory_gb = value;
+            tracing::info!("Prometheus: Cluster memory usage: {} GB", value);
+        }
+    }
+    
+    // Fetch namespace CPU usage
+    let namespace_cpu_query = format!("{}query?query={}", prometheus_url, 
+        format!("sum(rate(container_cpu_usage_seconds_total{{namespace=\"{}\"}}[5m]))", namespace));
+    
+    let response = http_client.get(&namespace_cpu_query).send().await?;
+    let prom_response: PrometheusResponse = response.json().await?;
+    
+    if prom_response.status == "success" && !prom_response.data.result.is_empty() {
+        if let Ok(value) = prom_response.data.result[0].value.1.parse::<f32>() {
+            metrics.namespace_used_cpu = value;
+            tracing::info!("Prometheus: Namespace {} CPU usage: {}", namespace, value);
+        }
+    }
+    
+    // Fetch namespace memory usage (in GB)
+    let namespace_mem_query = format!("{}query?query={}", prometheus_url, 
+        format!("sum(container_memory_working_set_bytes{{namespace=\"{}\"}}) / 1024 / 1024 / 1024", namespace));
+    
+    let response = http_client.get(&namespace_mem_query).send().await?;
+    let prom_response: PrometheusResponse = response.json().await?;
+    
+    if prom_response.status == "success" && !prom_response.data.result.is_empty() {
+        if let Ok(value) = prom_response.data.result[0].value.1.parse::<f32>() {
+            metrics.namespace_used_memory_gb = value;
+            tracing::info!("Prometheus: Namespace {} memory usage: {} GB", namespace, value);
+        }
+    }
     
     Ok(metrics)
 }
 
-// Function to update cluster and namespace utilization from Kubernetes metrics
-async fn update_utilization_from_k8s(state: AppState) -> Result<(), kube::Error> {
+// Update the existing function to use Prometheus data
+async fn update_utilization_from_k8s(state: AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Specify the simulation namespace
     let namespace = "larstesting";
     
-    // Fetch metrics from Kubernetes
-    match fetch_kubernetes_metrics(namespace).await {
+    // Fetch metrics from Prometheus instead of Kubernetes API
+    match fetch_prometheus_metrics(namespace).await {
         Ok(metrics) => {
-            // Update cluster utilization
+            // Add the active simulations to these base values
+            let active_sims = state.active_simulations.lock().await;
+            let sim_cpu: f32 = active_sims.values().map(|sim| sim.actual_cost.cpu_cores).sum();
+            let sim_memory: f32 = active_sims.values().map(|sim| sim.actual_cost.memory_gb).sum();
+            
+            // Update cluster utilization - Include simulations in cluster usage
             let mut cluster_util = state.cluster_utilization.lock().await;
             cluster_util.total_cpu_cores = metrics.cluster_total_cpu;
             cluster_util.total_memory_gb = metrics.cluster_total_memory_gb;
-            cluster_util.used_cpu_cores = metrics.cluster_used_cpu;
-            cluster_util.used_memory_gb = metrics.cluster_used_memory_gb;
-            cluster_util.cpu_percent = (metrics.cluster_used_cpu / metrics.cluster_total_cpu) * 100.0;
-            cluster_util.memory_percent = (metrics.cluster_used_memory_gb / metrics.cluster_total_memory_gb) * 100.0;
             
-            // Update namespace utilization
+            // Add simulation resource usage to cluster metrics
+            cluster_util.used_cpu_cores = metrics.cluster_used_cpu + sim_cpu;
+            cluster_util.used_memory_gb = metrics.cluster_used_memory_gb + sim_memory;
+            
+            // Recalculate percentages with simulation usage included
+            cluster_util.cpu_percent = (cluster_util.used_cpu_cores / cluster_util.total_cpu_cores) * 100.0;
+            cluster_util.memory_percent = (cluster_util.used_memory_gb / cluster_util.total_memory_gb) * 100.0;
+            
+            // Update namespace utilization with the real metrics plus our simulations
             let mut namespace_util = state.namespace_utilization.lock().await;
-            namespace_util.allocated_cpu_cores = metrics.namespace_cpu_limits;
-            namespace_util.allocated_memory_gb = metrics.namespace_memory_limits_gb;
-            namespace_util.used_cpu_cores = metrics.namespace_used_cpu;
-            namespace_util.used_memory_gb = metrics.namespace_used_memory_gb;
+            
+            // Base namespace values from Prometheus
+            let base_namespace_cpu = metrics.namespace_used_cpu;
+            let base_namespace_memory = metrics.namespace_used_memory_gb;
+            
+            // Total namespace usage = real metrics + simulation usage
+            namespace_util.used_cpu_cores = base_namespace_cpu + sim_cpu;
+            namespace_util.used_memory_gb = base_namespace_memory + sim_memory;
+            namespace_util.allocated_cpu_cores = metrics.namespace_cpu_limits.max(256.0); // Use at least 256 cores
+            namespace_util.allocated_memory_gb = metrics.namespace_memory_limits_gb.max(1024.0); // Use at least 1024 GB
             namespace_util.cpu_percent = (namespace_util.used_cpu_cores / namespace_util.allocated_cpu_cores) * 100.0;
             namespace_util.memory_percent = (namespace_util.used_memory_gb / namespace_util.allocated_memory_gb) * 100.0;
             namespace_util.cluster_total_cpu = metrics.cluster_total_cpu;
@@ -627,12 +642,12 @@ async fn update_utilization_from_k8s(state: AppState) -> Result<(), kube::Error>
             let _ = state.event_sender.send(AppEvent::ClusterUtilizationUpdated(cluster_util.clone()));
             let _ = state.event_sender.send(AppEvent::NamespaceUtilizationUpdated(namespace_util.clone()));
             
-            tracing::info!("Updated utilization metrics from Kubernetes for namespace '{}'", namespace);
+            tracing::info!("Updated utilization metrics from Prometheus for namespace '{}'", namespace);
             Ok(())
         },
         Err(e) => {
-            tracing::error!("Failed to fetch Kubernetes metrics for namespace '{}': {}", namespace, e);
-            Err(e)
+            tracing::error!("Failed to fetch Prometheus metrics: {}", e);
+            Err(e.into())
         }
     }
 }
@@ -702,80 +717,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Mock Monitoring Task ---
     let monitor_state = state.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(1)); // Update frequently
+        let mut interval = tokio::time::interval(Duration::from_secs(5)); // Update every 5 seconds
         loop {
             interval.tick().await;
-            let mut active_sims = monitor_state.active_simulations.lock().await;
-            let mut updated = false;
-
-            if active_sims.len() > 0 {
-                // Get resource limits
-                let mut cluster_util = monitor_state.cluster_utilization.lock().await;
-                let mut namespace_util = monitor_state.namespace_utilization.lock().await;
+            
+            // Update actual costs for all active simulations first
+            {
+                let mut active_sims = monitor_state.active_simulations.lock().await;
+                let cluster_util = monitor_state.cluster_utilization.lock().await;
                 
-                // Extract limits
-                let total_cluster_cpu = cluster_util.total_cpu_cores;
-                let total_cluster_memory = cluster_util.total_memory_gb;
-                let allocated_namespace_cpu = namespace_util.allocated_cpu_cores;
-                let allocated_namespace_memory = namespace_util.allocated_memory_gb;
-                
-                // Mock overall cluster utilization (independent of our namespace)
-                // This would come from external monitoring in a real system
-                // For this mock, we'll simulate cluster having base load plus our namespace
-                let base_cluster_cpu_usage = total_cluster_cpu * 0.25; // 25% base load from other namespaces
-                let base_cluster_memory_usage = total_cluster_memory * 0.30; // 30% base load from other namespaces
-                
-                // Calculate total resource usage from our simulations
-                let mut namespace_cpu = 0.0;
-                let mut namespace_memory = 0.0;
-
-                // Simulate cost changes for active simulations
                 for sim in active_sims.values_mut() {
                     // Apply realistic variation with small jitter
                     let cpu_jitter = 0.85 + rand::random::<f32>() * 0.3; // 85% to 115% variation
-                    sim.actual_cost.cpu_cores = sim.predicted_cost.cpu_cores * cpu_jitter;
-                    sim.actual_cost.memory_gb = sim.predicted_cost.memory_gb * (0.9 + rand::random::<f32>() * 0.2);
+                    let mem_jitter = 0.9 + rand::random::<f32>() * 0.2;  // 90% to 110% variation
                     
-                    // Add to namespace totals
-                    namespace_cpu += sim.actual_cost.cpu_cores;
-                    namespace_memory += sim.actual_cost.memory_gb;
-                    updated = true;
+                    // Calculate actual cost based on predicted cost + jitter
+                    // Removed the efficiency multiplier which was causing exponential growth
+                    sim.actual_cost.cpu_cores = sim.predicted_cost.cpu_cores * cpu_jitter;
+                    sim.actual_cost.memory_gb = sim.predicted_cost.memory_gb * mem_jitter;
                 }
-
-                // Update namespace utilization metrics
-                namespace_util.used_cpu_cores = namespace_cpu;
-                namespace_util.used_memory_gb = namespace_memory;
-                namespace_util.cpu_percent = (namespace_cpu / allocated_namespace_cpu) * 100.0;
-                namespace_util.memory_percent = (namespace_memory / allocated_namespace_memory) * 100.0;
-                namespace_util.cluster_total_cpu = total_cluster_cpu;
-                namespace_util.cluster_total_memory = total_cluster_memory;
                 
-                // Update cluster utilization metrics 
-                // (total of our namespace plus the base load from other namespaces)
-                cluster_util.used_cpu_cores = namespace_cpu + base_cluster_cpu_usage;
-                cluster_util.used_memory_gb = namespace_memory + base_cluster_memory_usage;
-                cluster_util.cpu_percent = (cluster_util.used_cpu_cores / total_cluster_cpu) * 100.0;
-                cluster_util.memory_percent = (cluster_util.used_memory_gb / total_cluster_memory) * 100.0;
-                
-                // Send utilization updates
-                let _ = monitor_state.event_sender.send(AppEvent::ClusterUtilizationUpdated(cluster_util.clone()));
-                let _ = monitor_state.event_sender.send(AppEvent::NamespaceUtilizationUpdated(namespace_util.clone()));
-                
-                tracing::debug!(
-                    "Resource update - Namespace: CPU {:.1}% ({:.1}/{:.1}), Memory {:.1}% ({:.1}/{:.1}GB) | Cluster: CPU {:.1}% ({:.1}/{:.1}), Memory {:.1}% ({:.1}/{:.1}GB)", 
-                    namespace_util.cpu_percent, namespace_util.used_cpu_cores, namespace_util.allocated_cpu_cores,
-                    namespace_util.memory_percent, namespace_util.used_memory_gb, namespace_util.allocated_memory_gb,
-                    cluster_util.cpu_percent, cluster_util.used_cpu_cores, cluster_util.total_cpu_cores,
-                    cluster_util.memory_percent, cluster_util.used_memory_gb, cluster_util.total_memory_gb
-                );
+                // If there are active simulations, broadcast an update
+                if !active_sims.is_empty() {
+                    let active_list: Vec<ActiveSimulation> = active_sims.values().cloned().collect();
+                    let _ = monitor_state.event_sender.send(AppEvent::ActiveUpdated(active_list));
+                }
             }
-
-            if updated {
-                // Collect current active sims to send full state
-                let active_list: Vec<ActiveSimulation> = active_sims.values().cloned().collect();
-                // Send update event - ignore error if no receivers yet
-                let _ = monitor_state.event_sender.send(AppEvent::ActiveUpdated(active_list));
-                tracing::debug!("Sent ActiveUpdated event via broadcast");
+            
+            // Try to get real metrics from Prometheus
+            if let Err(e) = update_utilization_from_k8s(monitor_state.clone()).await {
+                tracing::warn!("Failed to fetch Prometheus metrics: {:?}", e);
+                
+                // If Prometheus fetch fails, fall back to calculating metrics from active simulations
+                let active_sims = monitor_state.active_simulations.lock().await;
+                
+                if active_sims.len() > 0 {
+                    // Calculate total namespace usage from active simulations
+                    let sim_cpu: f32 = active_sims.values().map(|sim| sim.actual_cost.cpu_cores).sum();
+                    let sim_memory: f32 = active_sims.values().map(|sim| sim.actual_cost.memory_gb).sum();
+                    
+                    tracing::debug!("Active simulations resource usage: CPU {:.2} cores, Memory {:.2} GB", sim_cpu, sim_memory);
+                    
+                    // Update namespace utilization with simulation data
+                    let mut namespace_util = monitor_state.namespace_utilization.lock().await;
+                    namespace_util.used_cpu_cores = sim_cpu;
+                    namespace_util.used_memory_gb = sim_memory;
+                    namespace_util.cpu_percent = (sim_cpu / namespace_util.allocated_cpu_cores) * 100.0;
+                    namespace_util.memory_percent = (sim_memory / namespace_util.allocated_memory_gb) * 100.0;
+                    
+                    // Get current cluster state
+                    let mut cluster_util = monitor_state.cluster_utilization.lock().await;
+                    
+                    // Update namespace with cluster totals
+                    namespace_util.cluster_total_cpu = cluster_util.total_cpu_cores;
+                    namespace_util.cluster_total_memory = cluster_util.total_memory_gb;
+                    
+                    // Update cluster metrics using our simulations plus base load
+                    // This is only a fallback if Prometheus fails
+                    let base_cluster_cpu = cluster_util.total_cpu_cores * 0.25; // 25% base load
+                    let base_cluster_memory = cluster_util.total_memory_gb * 0.3; // 30% base load
+                    
+                    cluster_util.used_cpu_cores = sim_cpu + base_cluster_cpu;
+                    cluster_util.used_memory_gb = sim_memory + base_cluster_memory;
+                    cluster_util.cpu_percent = (cluster_util.used_cpu_cores / cluster_util.total_cpu_cores) * 100.0;
+                    cluster_util.memory_percent = (cluster_util.used_memory_gb / cluster_util.total_memory_gb) * 100.0;
+                    
+                    // Send updates
+                    let _ = monitor_state.event_sender.send(AppEvent::NamespaceUtilizationUpdated(namespace_util.clone()));
+                    let _ = monitor_state.event_sender.send(AppEvent::ClusterUtilizationUpdated(cluster_util.clone()));
+                    
+                    tracing::debug!(
+                        "Resource update (simulations only) - Namespace: CPU {:.1} cores, Memory {:.1} GB", 
+                        sim_cpu, sim_memory
+                    );
+                }
             }
         }
     });
@@ -784,7 +799,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scheduler_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(10));
-        let max_concurrent_sims = 5;
         let mut mock_completion_timers: HashMap<Uuid, tokio::time::Instant> = HashMap::new();
 
         loop {
@@ -861,7 +875,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // --------------------------------------------------------
 
             // 2. Try to schedule new simulations
-            while scheduler_state.active_simulations.lock().await.len() < max_concurrent_sims && !queue.is_empty() {
+            while !queue.is_empty() {
+                // Check current CPU usage - only admit if usage is below 80%
+                let cluster_util = scheduler_state.cluster_utilization.lock().await;
+                if cluster_util.cpu_percent >= 80.0 {
+                    tracing::info!("Current CPU usage at {}%, pausing admissions", cluster_util.cpu_percent);
+                    break; // Stop admitting new simulations
+                }
+                
+                // Also check if admitting would exceed 100% (prevent overcommit)
+                if let Some(next_sim) = queue.front() {
+                    let predicted_cpu = next_sim.predicted_cost.cpu_cores;
+                    let total_cpu_if_admitted = cluster_util.used_cpu_cores + predicted_cpu;
+                    let percent_if_admitted = (total_cpu_if_admitted / cluster_util.total_cpu_cores) * 100.0;
+                    
+                    if percent_if_admitted > 99.0 {
+                        tracing::info!("Admitting next simulation would exceed CPU capacity ({}%), pausing", percent_if_admitted);
+                        break;
+                    }
+                }
+                
+                // Release the lock before continuing
+                drop(cluster_util);
+                
                 if let Some(queued_sim) = queue.pop_front() {
                     queue_updated = true;
                     active_updated = true; // Need to broadcast active update too
@@ -898,20 +934,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                  let current_active = scheduler_state.active_simulations.lock().await.values().cloned().collect();
                  let _ = scheduler_state.event_sender.send(AppEvent::ActiveUpdated(current_active));
                  tracing::debug!("Sent ActiveUpdated event via broadcast (scheduler)");
-            }
-        }
-    });
-
-    // Add a task to periodically fetch Kubernetes metrics
-    let k8s_state = state.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
-        loop {
-            interval.tick().await;
-            // Try to update from K8s, but fallback to mock data if it fails
-            if let Err(e) = update_utilization_from_k8s(k8s_state.clone()).await {
-                tracing::warn!("Using mock utilization data: {}", e);
-                // We'll continue using the mock data from the monitoring task
             }
         }
     });

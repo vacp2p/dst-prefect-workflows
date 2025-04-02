@@ -96,29 +96,33 @@
 
     // Auto-submit functionality
     const autoSubmitButton = document.getElementById('auto-submit-button');
-    let autoSubmitInterval = null;
+    let autoSubmitEnabled = false;
+    let queueLength = 0;
+
+    // Function to check queue size and add more simulations if needed
+    function checkQueueAndSubmit() {
+        if (autoSubmitEnabled && queueLength < 3) {
+            console.log("Queue low, automatically submitting more simulations");
+            submitMockSimulations();
+        }
+    }
 
     autoSubmitButton.addEventListener('click', () => {
-        if (autoSubmitInterval) {
+        if (autoSubmitEnabled) {
             // Stop auto-submission
-            clearInterval(autoSubmitInterval);
-            autoSubmitInterval = null;
+            autoSubmitEnabled = false;
             autoSubmitButton.textContent = 'Auto Submit';
             autoSubmitButton.classList.remove('bg-red-600', 'hover:bg-red-700');
             autoSubmitButton.classList.add('bg-green-600', 'hover:bg-green-700');
         } else {
-            // Start auto-submission every 15 seconds
+            // Start auto-submission
+            autoSubmitEnabled = true;
             autoSubmitButton.textContent = 'Stop Auto';
             autoSubmitButton.classList.remove('bg-green-600', 'hover:bg-green-700');
             autoSubmitButton.classList.add('bg-red-600', 'hover:bg-red-700');
             
             // Submit immediately
             submitMockSimulations();
-            
-            // Then set up interval
-            autoSubmitInterval = setInterval(() => {
-                submitMockSimulations();
-            }, 15000); // 15 seconds
         }
     });
 
@@ -277,11 +281,14 @@
         const activeClass = resourceType === 'cpu' ? 'bg-blue-500' : 'bg-purple-500';
         const inactiveClass = 'bg-gray-300 dark:bg-gray-600';
         
+        console.log(`Updating ${resourceType} blocks with value: ${usageValue}`);
+        
         // Clear existing blocks
         container.innerHTML = '';
         
         if (usageValue <= 0) {
             // No usage, no blocks
+            console.log(`No ${resourceType} usage to display`);
             return;
         }
         
@@ -384,6 +391,10 @@
             
             // Update the queued title with count
             queuedTitle.textContent = `Queued Simulations (${queueItems.length})`;
+            
+            // Update queue length and check if we need to add more
+            queueLength = queueItems.length;
+            checkQueueAndSubmit();
         } else if (data.type === "ActiveUpdated") {
             // Update active simulations display
             const activeItems = data.data;
