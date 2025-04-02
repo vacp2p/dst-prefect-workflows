@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}LARS - Lab Automated Resource Scheduler{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        // Check for dark mode preference
+        if (localStorage.getItem('color-theme') === 'dark' || (!('color-theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.documentElement.classList.add('dark');
+        } else {
+            document.documentElement.classList.remove('dark')
+        }
+    </script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: {
+                            50: '#f0f9ff',
+                            100: '#e0f2fe',
+                            200: '#bae6fd',
+                            300: '#7dd3fc',
+                            400: '#38bdf8',
+                            500: '#0ea5e9',
+                            600: '#0284c7',
+                            700: '#0369a1',
+                            800: '#075985',
+                            900: '#0c4a6e',
+                        },
+                    }
+                }
+            }
+        }
+    </script>
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .content-auto {
+                content-visibility: auto;
+            }
+        }
+        
+        /* Resource blocks sizing */
+        .resource-block {
+            @apply h-4 rounded-sm transition-all duration-300;
+            margin-right: 1px;
+        }
+        .resource-block-small {
+            @apply w-2; /* 0.1 units (0.5rem) */
+        }
+        .resource-block-medium {
+            @apply w-6; /* 1 unit (1.5rem = 3x small) */
+        }
+        .resource-block-large {
+            @apply w-10; /* 10 units (2.5rem = 5x small) */
+        }
+        .resource-block-xlarge {
+            @apply w-16; /* 100 units (4rem = 8x small) */
+        }
+        .resource-block-xxlarge {
+            @apply w-24; /* 1000 units (6rem = 12x small) */
+        }
+        
+        /* Fixed-size visualization containers */
+        .blocks-container {
+            @apply flex flex-wrap gap-0.5 overflow-x-auto;
+            height: 2.5rem;
+            min-width: 100%;
+        }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body class="bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white min-h-screen flex flex-col">
+    <!-- Main Navigation Header -->
+    <header class="bg-primary-600 dark:bg-primary-800 text-white shadow-md">
+        <div class="container mx-auto p-4">
+            <div class="flex justify-between items-center">
+                <!-- Logo and title -->
+                <div class="flex items-center space-x-4">
+                    <h1 class="text-2xl font-bold">LARS</h1>
+                    <div class="text-sm">Lab Automated Resource Scheduler</div>
+                </div>
+                
+                <!-- Navigation -->
+                <nav>
+                    <ul class="flex space-x-6">
+                        <li><a href="/" class="hover:text-primary-200 transition-colors">Dashboard</a></li>
+                        <li><a href="/history" class="hover:text-primary-200 transition-colors">History</a></li>
+                        <li>
+                            <button id="theme-toggle" class="p-2 rounded-lg hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-gray-200">
+                                <svg id="theme-toggle-dark-icon" class="hidden w-5 h-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"></path>
+                                </svg>
+                                <svg id="theme-toggle-light-icon" class="hidden w-5 h-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" fill-rule="evenodd" clip-rule="evenodd"></path>
+                                </svg>
+                            </button>
+                        </li>
+                    </ul>
+                </nav>
+            </div>
+        </div>
+    </header>
+    
+    <!-- Cluster Resource Usage Subheader -->
+    <div class="bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 py-2">
+        <div class="container mx-auto px-4">
+            <div class="grid grid-cols-2 gap-4">
+                <!-- Cluster Section -->
+                <div>
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="text-xs font-medium uppercase tracking-wider">Cluster</span>
+                        <div class="flex space-x-1 items-center">
+                            <span class="text-xs">CPU:</span>
+                            <span id="cpu-text" class="text-xs font-medium">0.0 / 0.0 cores (0%)</span>
+                        </div>
+                    </div>
+                    
+                    <!-- CPU Progress -->
+                    <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 mb-2">
+                        <div id="cpu-progress" class="bg-blue-500 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                    </div>
+                    
+                    <div class="flex justify-between items-center mb-1">
+                        <div class="flex space-x-1 items-center">
+                            <span class="text-xs">Memory:</span>
+                            <span id="memory-text" class="text-xs font-medium">0.0 / 0.0 GB (0%)</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Memory Progress -->
+                    <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                        <div id="memory-progress" class="bg-purple-500 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                    </div>
+                </div>
+                
+                <!-- Namespace Summary Section -->
+                <div>
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="text-xs font-medium uppercase tracking-wider">Namespace: larstesting</span>
+                        <div class="flex space-x-1 items-center">
+                            <span class="text-xs">CPU:</span>
+                            <span id="namespace-relative-text" class="text-xs font-medium">0.0 / 0.0 cores (0%)</span>
+                        </div>
+                    </div>
+                    
+                    <!-- CPU Progress relative to cluster total -->
+                    <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2 mb-2">
+                        <div id="namespace-relative-cpu-progress" class="bg-blue-500 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                    </div>
+                    
+                    <div class="flex justify-between items-center mb-1">
+                        <div class="flex space-x-1 items-center">
+                            <span class="text-xs">Memory:</span>
+                            <span id="namespace-relative-memory-text" class="text-xs font-medium">0.0 / 0.0 GB (0%)</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Memory Progress relative to cluster total -->
+                    <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                        <div id="namespace-relative-memory-progress" class="bg-purple-500 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                    </div>
+                    
+                    <!-- Keep the hidden progress bars for the block-based visualization -->
+                    <div class="hidden">
+                        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                            <div id="namespace-cpu-progress" class="bg-blue-500 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                        </div>
+                        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                            <div id="namespace-memory-progress" class="bg-purple-500 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Namespace Block Visualization Subheader -->
+    <div class="bg-gray-200 dark:bg-gray-900 border-b border-gray-300 dark:border-gray-600 py-2">
+        <div class="container mx-auto px-4">
+            <div class="grid grid-cols-2 gap-4">
+                <!-- CPU Blocks -->
+                <div>
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="text-xs font-medium uppercase tracking-wider">larstesting CPU Usage</span>
+                        <span id="namespace-cpu-text" class="text-xs font-bold">0.0 cores</span>
+                    </div>
+                    <div class="h-10 bg-gray-100 dark:bg-gray-700 rounded p-1 relative">
+                        <div id="namespace-cpu-blocks" class="blocks-container">
+                            <!-- Blocks will be added dynamically -->
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Memory Blocks -->
+                <div>
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="text-xs font-medium uppercase tracking-wider">larstesting Memory Usage</span>
+                        <span id="namespace-memory-text" class="text-xs font-bold">0.0 GB</span>
+                    </div>
+                    <div class="h-10 bg-gray-100 dark:bg-gray-700 rounded p-1 relative">
+                        <div id="namespace-memory-blocks" class="blocks-container">
+                            <!-- Blocks will be added dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <main class="flex-1">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="bg-gray-100 dark:bg-gray-800 py-4 mt-8">
+        <div class="container mx-auto px-4 text-center text-gray-600 dark:text-gray-400 text-sm">
+            &copy; 2025 LARS - Lab Automated Resource Scheduler
+        </div>
+    </footer>
+
+    <script>
+        // Dark mode toggle functionality
+        var themeToggleBtn = document.getElementById('theme-toggle');
+        var themeToggleDarkIcon = document.getElementById('theme-toggle-dark-icon');
+        var themeToggleLightIcon = document.getElementById('theme-toggle-light-icon');
+
+        // Change the icons inside the button based on previous settings
+        if (localStorage.getItem('color-theme') === 'dark' || (!('color-theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+            themeToggleLightIcon.classList.remove('hidden');
+        } else {
+            themeToggleDarkIcon.classList.remove('hidden');
+        }
+
+        themeToggleBtn.addEventListener('click', function() {
+            // Toggle icons
+            themeToggleDarkIcon.classList.toggle('hidden');
+            themeToggleLightIcon.classList.toggle('hidden');
+
+            // If set via local storage previously
+            if (localStorage.getItem('color-theme')) {
+                if (localStorage.getItem('color-theme') === 'light') {
+                    document.documentElement.classList.add('dark');
+                    localStorage.setItem('color-theme', 'dark');
+                } else {
+                    document.documentElement.classList.remove('dark');
+                    localStorage.setItem('color-theme', 'light');
+                }
+            } else {
+                // If not set via local storage previously
+                if (document.documentElement.classList.contains('dark')) {
+                    document.documentElement.classList.remove('dark');
+                    localStorage.setItem('color-theme', 'light');
+                } else {
+                    document.documentElement.classList.add('dark');
+                    localStorage.setItem('color-theme', 'dark');
+                }
+            }
+        });
+
+        // Initialize resource blocks
+        document.addEventListener('DOMContentLoaded', function() {
+            // Initialize the resource blocks containers
+            initializeResourceBlocks();
+            
+            // Initialize the main namespace metrics
+            const namespaceCpuText = document.getElementById('namespace-cpu-text');
+            const namespaceMemText = document.getElementById('namespace-memory-text');
+            if (namespaceCpuText) {
+                namespaceCpuText.textContent = '0.0 cores';
+            }
+            if (namespaceMemText) {
+                namespaceMemText.textContent = '0.0 GB';
+            }
+        });
+        
+        function initializeResourceBlocks() {
+            const cpuBlocksContainer = document.getElementById('namespace-cpu-blocks');
+            const memoryBlocksContainer = document.getElementById('namespace-memory-blocks');
+            
+            // Clear existing blocks if any
+            cpuBlocksContainer.innerHTML = '';
+            memoryBlocksContainer.innerHTML = '';
+            
+            // Store the configuration for later use
+            window.resourceConfig = {
+                // Namespace capacity limits for block visualization (these are visual limits, not actual cluster limits)
+                limits: {
+                    cpu: 5000,    // Visualize up to 5000 cores
+                    memory: 10240 // Visualize up to 10 TiB (10240 GB)
+                },
+                // Block size thresholds and configuration
+                blockSizes: [
+                    { class: 'resource-block-small', value: 0.1, max: 0.9 },      // 0.1-0.9 units
+                    { class: 'resource-block-medium', value: 1, max: 9.9 },       // 1-9.9 units
+                    { class: 'resource-block-large', value: 10, max: 99.9 },      // 10-99.9 units
+                    { class: 'resource-block-xlarge', value: 100, max: 999.9 },   // 100-999.9 units
+                    { class: 'resource-block-xxlarge', value: 1000, max: 9999.9 } // 1000-9999.9 units
+                ],
+                // Maximum number of blocks to render for each size (to avoid too many DOM elements)
+                maxBlocks: {
+                    small: 9,      // Max 9 small blocks (0.1 unit each)
+                    medium: 9,     // Max 9 medium blocks (1 unit each)
+                    large: 9,      // Max 9 large blocks (10 units each)
+                    xlarge: 9,     // Max 9 xlarge blocks (100 units each)
+                    xxlarge: 5     // Max 5 xxlarge blocks (1000 units each)
+                }
+            };
+        }
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

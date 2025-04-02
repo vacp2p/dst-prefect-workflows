@@ -13,25 +13,20 @@
             <div>
                 <label for="count" class="block text-sm font-medium text-gray-300 mb-2">Number to Add:</label>
                 <div class="relative rounded-md shadow-sm">
-                    <input type="number" name="count" id="count" min="1" max="10" value="5" class="bg-gray-700 text-white focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 rounded-md">
-                    <div class="absolute inset-y-0 right-0 flex items-center">
-                        <button id="increment" class="h-full px-3 text-gray-300 hover:text-white">+</button>
-                        <button id="decrement" class="h-full px-3 text-gray-300 hover:text-white">-</button>
-                    </div>
+                    <input type="number" name="count" id="count" min="1" value="5" class="bg-gray-700 text-white focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 rounded-md">
                 </div>
             </div>
             <div>
                 <label for="baseNodes" class="block text-sm font-medium text-gray-300 mb-2">Base Nodes:</label>
                 <div class="relative rounded-md shadow-sm">
-                    <input type="number" name="baseNodes" id="baseNodes" min="1" max="1000" value="100" class="bg-gray-700 text-white focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 rounded-md">
-                    <div class="absolute inset-y-0 right-0 flex items-center">
-                        <button id="incrementNodes" class="h-full px-3 text-gray-300 hover:text-white">+</button>
-                        <button id="decrementNodes" class="h-full px-3 text-gray-300 hover:text-white">-</button>
-                    </div>
+                    <input type="number" name="baseNodes" id="baseNodes" min="1" max="1000" value="100" step="50" class="bg-gray-700 text-white focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 rounded-md">
                 </div>
             </div>
             <button id="submit-button" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-8 rounded-md transition-colors">
                 Submit
+            </button>
+            <button id="auto-submit-button" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2.5 px-8 rounded-md transition-colors">
+                Auto Submit
             </button>
         </div>
     </div>
@@ -40,7 +35,7 @@
     <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
         <!-- Queued Simulations -->
         <div class="md:col-span-1">
-            <h2 class="text-xl font-semibold mb-4">Queued Simulations</h2>
+            <h2 class="text-xl font-semibold mb-4" id="queued-title">Queued Simulations (0)</h2>
             <div id="queue-container" class="space-y-4">
                 <!-- Queue items will be added dynamically here -->
             </div>
@@ -48,20 +43,20 @@
 
         <!-- Active Simulations -->
         <div class="md:col-span-1">
-            <h2 class="text-xl font-semibold mb-4">Active Simulations</h2>
+            <h2 class="text-xl font-semibold mb-4" id="active-title">Active Simulations (0)</h2>
             <div id="active-container" class="space-y-4">
                 <!-- Active items will be added dynamically here -->
             </div>
         </div>
 
-        <!-- Last Finished Simulation -->
+        <!-- Last 10 Finished Simulations -->
         <div class="md:col-span-1">
-            <h2 class="text-xl font-semibold mb-4">Last Finished Simulation</h2>
-            <div id="last-finished-container">
+            <h2 class="text-xl font-semibold mb-4">Last 10 Finished Simulations</h2>
+            <div id="last-finished-container" class="space-y-4">
                 <div id="no-finished" class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4 text-gray-300">
                     No simulations completed yet.
                 </div>
-                <!-- Last finished simulation will be added dynamically here -->
+                <!-- Last finished simulations will be added dynamically here -->
             </div>
         </div>
     </div>
@@ -78,43 +73,62 @@
     const countInput = document.getElementById('count');
     const baseNodesInput = document.getElementById('baseNodes');
     const submitButton = document.getElementById('submit-button');
-    const incrementButton = document.getElementById('increment');
-    const decrementButton = document.getElementById('decrement');
-    const incrementNodesButton = document.getElementById('incrementNodes');
-    const decrementNodesButton = document.getElementById('decrementNodes');
     const cpuProgress = document.getElementById('cpu-progress');
     const memoryProgress = document.getElementById('memory-progress');
     const cpuText = document.getElementById('cpu-text');
     const memoryText = document.getElementById('memory-text');
+    const namespaceCpuProgress = document.getElementById('namespace-cpu-progress');
+    const namespaceMemoryProgress = document.getElementById('namespace-memory-progress');
+    const namespaceCpuText = document.getElementById('namespace-cpu-text');
+    const namespaceMemoryText = document.getElementById('namespace-memory-text');
+    const namespaceRelativeCpuProgress = document.getElementById('namespace-relative-cpu-progress');
+    const namespaceRelativeMemoryProgress = document.getElementById('namespace-relative-memory-progress');
+    const namespaceRelativeText = document.getElementById('namespace-relative-text');
+    const namespaceRelativeMemoryText = document.getElementById('namespace-relative-memory-text');
+    const queuedTitle = document.getElementById('queued-title');
+    const activeTitle = document.getElementById('active-title');
 
     // Number input handlers
-    incrementButton.addEventListener('click', () => {
-        const current = parseInt(countInput.value, 10);
-        countInput.value = Math.min(current + 1, 10);
-    });
-
-    decrementButton.addEventListener('click', () => {
-        const current = parseInt(countInput.value, 10);
-        countInput.value = Math.max(current - 1, 1);
-    });
-
-    incrementNodesButton.addEventListener('click', () => {
-        const current = parseInt(baseNodesInput.value, 10);
-        baseNodesInput.value = Math.min(current + 50, 1000);
-    });
-
-    decrementNodesButton.addEventListener('click', () => {
-        const current = parseInt(baseNodesInput.value, 10);
-        baseNodesInput.value = Math.max(current - 50, 1);
-    });
+    // (removed custom increment/decrement button handlers)
 
     // Submit button handler
-    submitButton.addEventListener('click', async () => {
+    submitButton.addEventListener('click', submitMockSimulations);
+
+    // Auto-submit functionality
+    const autoSubmitButton = document.getElementById('auto-submit-button');
+    let autoSubmitInterval = null;
+
+    autoSubmitButton.addEventListener('click', () => {
+        if (autoSubmitInterval) {
+            // Stop auto-submission
+            clearInterval(autoSubmitInterval);
+            autoSubmitInterval = null;
+            autoSubmitButton.textContent = 'Auto Submit';
+            autoSubmitButton.classList.remove('bg-red-600', 'hover:bg-red-700');
+            autoSubmitButton.classList.add('bg-green-600', 'hover:bg-green-700');
+        } else {
+            // Start auto-submission every 15 seconds
+            autoSubmitButton.textContent = 'Stop Auto';
+            autoSubmitButton.classList.remove('bg-green-600', 'hover:bg-green-700');
+            autoSubmitButton.classList.add('bg-red-600', 'hover:bg-red-700');
+            
+            // Submit immediately
+            submitMockSimulations();
+            
+            // Then set up interval
+            autoSubmitInterval = setInterval(() => {
+                submitMockSimulations();
+            }, 15000); // 15 seconds
+        }
+    });
+
+    // Function to submit mock simulations
+    async function submitMockSimulations() {
         const count = parseInt(countInput.value, 10);
         const baseNodes = parseInt(baseNodesInput.value, 10);
         
-        if (count < 1 || count > 10 || isNaN(count)) {
-            alert('Please enter a valid count between 1 and 10.');
+        if (count < 1 || isNaN(count)) {
+            alert('Please enter a valid number of simulations (minimum 1).');
             return;
         }
         
@@ -155,7 +169,7 @@
                 submitButton.textContent = 'Submit';
             }, 1000);
         }
-    });
+    }
 
     // Format a queue item for display
     function formatQueueItem(item) {
@@ -198,7 +212,7 @@
     }
 
     // Update the cluster utilization display
-    function updateUtilization(utilization) {
+    function updateClusterUtilization(utilization) {
         // Update CPU usage
         const cpuPercent = utilization.cpu_percent.toFixed(1);
         cpuProgress.style.width = `${cpuPercent}%`;
@@ -210,26 +224,138 @@
         memoryText.textContent = `${utilization.used_memory_gb.toFixed(1)} / ${utilization.total_memory_gb.toFixed(1)} GB (${memPercent}%)`;
         
         // Add color coding based on utilization
-        if (utilization.cpu_percent > 80) {
-            cpuProgress.classList.remove('bg-blue-600', 'bg-yellow-500', 'bg-blue-400');
-            cpuProgress.classList.add('bg-red-600');
-        } else if (utilization.cpu_percent > 50) {
-            cpuProgress.classList.remove('bg-blue-600', 'bg-red-600', 'bg-blue-400');
-            cpuProgress.classList.add('bg-yellow-500');
-        } else {
-            cpuProgress.classList.remove('bg-yellow-500', 'bg-red-600', 'bg-blue-600');
-            cpuProgress.classList.add('bg-blue-400');
+        updateProgressBarColor(cpuProgress, cpuPercent);
+        updateProgressBarColor(memoryProgress, memPercent, true);
+    }
+
+    // Update the namespace utilization display with blocks
+    function updateNamespaceUtilization(utilization) {
+        // Update CPU text display - show only raw usage (no percentages)
+        namespaceCpuText.textContent = `${utilization.used_cpu_cores.toFixed(1)} cores`;
+        
+        // Update Memory text display - show only raw usage (no percentages)
+        namespaceMemoryText.textContent = `${utilization.used_memory_gb.toFixed(1)} GB`;
+        
+        // Still calculate percentages for the hidden progress bars (used for color coding)
+        const cpuPercent = utilization.cpu_percent.toFixed(1);
+        const memPercent = utilization.memory_percent.toFixed(1);
+        namespaceCpuProgress.style.width = `${cpuPercent}%`;
+        namespaceMemoryProgress.style.width = `${memPercent}%`;
+        
+        // Update color coding based on utilization
+        updateProgressBarColor(namespaceCpuProgress, cpuPercent);
+        updateProgressBarColor(namespaceMemoryProgress, memPercent, true);
+        
+        // Update relative progress bars (namespace usage vs cluster total)
+        // These percentages show how much of the total cluster resources the namespace is using
+        const cpuRelativePercent = (utilization.used_cpu_cores / utilization.cluster_total_cpu) * 100;
+        const memRelativePercent = (utilization.used_memory_gb / utilization.cluster_total_memory) * 100;
+        
+        // Update progress bars
+        namespaceRelativeCpuProgress.style.width = `${cpuRelativePercent}%`;
+        namespaceRelativeMemoryProgress.style.width = `${memRelativePercent}%`;
+        
+        // Update text displays
+        namespaceRelativeText.textContent = `${utilization.used_cpu_cores.toFixed(1)} / ${utilization.cluster_total_cpu.toFixed(1)} cores (${cpuRelativePercent.toFixed(1)}%)`;
+        namespaceRelativeMemoryText.textContent = `${utilization.used_memory_gb.toFixed(1)} / ${utilization.cluster_total_memory.toFixed(1)} GB (${memRelativePercent.toFixed(1)}%)`;
+        
+        // Update color coding for the relative bars
+        updateProgressBarColor(namespaceRelativeCpuProgress, cpuRelativePercent);
+        updateProgressBarColor(namespaceRelativeMemoryProgress, memRelativePercent, true);
+        
+        // Update CPU blocks
+        updateResourceBlocks('cpu', utilization.used_cpu_cores);
+        
+        // Update Memory blocks
+        updateResourceBlocks('memory', utilization.used_memory_gb);
+    }
+    
+    // Update the resource blocks based on usage value
+    function updateResourceBlocks(resourceType, usageValue) {
+        const config = window.resourceConfig;
+        const container = document.getElementById(`namespace-${resourceType}-blocks`);
+        const activeClass = resourceType === 'cpu' ? 'bg-blue-500' : 'bg-purple-500';
+        const inactiveClass = 'bg-gray-300 dark:bg-gray-600';
+        
+        // Clear existing blocks
+        container.innerHTML = '';
+        
+        if (usageValue <= 0) {
+            // No usage, no blocks
+            return;
         }
         
-        if (utilization.memory_percent > 80) {
-            memoryProgress.classList.remove('bg-purple-600', 'bg-yellow-500', 'bg-purple-400');
-            memoryProgress.classList.add('bg-red-600');
-        } else if (utilization.memory_percent > 50) {
-            memoryProgress.classList.remove('bg-purple-600', 'bg-red-600', 'bg-purple-400');
-            memoryProgress.classList.add('bg-yellow-500');
+        // Get maximum defined limit for capping
+        const maxValue = config.limits[resourceType];
+        
+        // If exceeds our visualization capacity, show a warning and cap at max
+        if (usageValue > maxValue) {
+            const warningElement = document.createElement('div');
+            warningElement.classList.add('text-xs', 'text-red-500', 'font-bold', 'ml-1');
+            warningElement.textContent = `⚠️ Exceeds display range`;
+            container.appendChild(warningElement);
+            
+            // Cap at maximum for visualization
+            usageValue = maxValue;
+        }
+        
+        // Remaining value to represent
+        let remainingValue = usageValue;
+        
+        // Process blocks from largest to smallest
+        for (let i = config.blockSizes.length - 1; i >= 0; i--) {
+            const blockConfig = config.blockSizes[i];
+            const blockValue = blockConfig.value;
+            const blockClass = blockConfig.class;
+            const maxBlocks = Object.values(config.maxBlocks)[i];
+            
+            // How many full blocks of this size fit into the remaining value
+            const blockCount = Math.floor(remainingValue / blockValue);
+            
+            if (blockCount > 0) {
+                // Create blocks (up to the maximum)
+                const blocksToCreate = Math.min(blockCount, maxBlocks);
+                for (let j = 0; j < blocksToCreate; j++) {
+                    const blockElement = document.createElement('div');
+                    blockElement.classList.add('resource-block', blockClass, activeClass);
+                    blockElement.setAttribute('title', `${blockValue} ${resourceType === 'cpu' ? 'cores' : 'GB'}`);
+                    container.appendChild(blockElement);
+                }
+                
+                // If we had to cap blocks, add an indicator
+                if (blockCount > maxBlocks) {
+                    const moreIndicator = document.createElement('div');
+                    moreIndicator.classList.add('text-xs', 'mx-1', 'my-auto', 'whitespace-nowrap');
+                    const remaining = blockCount - maxBlocks;
+                    const resourceLabel = remaining === 1 
+                        ? (blockValue === 1 ? (resourceType === 'cpu' ? 'core' : 'GB') : `× ${blockValue}`) 
+                        : `× ${blockValue}`;
+                    moreIndicator.textContent = `+${remaining} ${resourceLabel}`;
+                    container.appendChild(moreIndicator);
+                }
+                
+                // Subtract what we've rendered from the remaining value
+                remainingValue -= blockCount * blockValue;
+            }
+            
+            // If the remaining value is very small (less than 0.01), we can stop
+            if (remainingValue < 0.01) break;
+        }
+    }
+
+    // Helper function to update progress bar color based on percentage
+    function updateProgressBarColor(progressBar, percent, isMemory = false) {
+        const baseClass = isMemory ? 'bg-purple-500' : 'bg-blue-500';
+        
+        if (percent > 80) {
+            progressBar.classList.remove(baseClass, 'bg-yellow-500');
+            progressBar.classList.add('bg-red-500');
+        } else if (percent > 50) {
+            progressBar.classList.remove(baseClass, 'bg-red-500');
+            progressBar.classList.add('bg-yellow-500');
         } else {
-            memoryProgress.classList.remove('bg-yellow-500', 'bg-red-600', 'bg-purple-600');
-            memoryProgress.classList.add('bg-purple-400');
+            progressBar.classList.remove('bg-yellow-500', 'bg-red-500');
+            progressBar.classList.add(baseClass);
         }
     }
 
@@ -255,28 +381,51 @@
             queueContainer.innerHTML = queueItems.length === 0 
                 ? '<div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4 text-gray-300">No simulations in queue</div>' 
                 : queueItems.map(formatQueueItem).join('');
+            
+            // Update the queued title with count
+            queuedTitle.textContent = `Queued Simulations (${queueItems.length})`;
         } else if (data.type === "ActiveUpdated") {
             // Update active simulations display
             const activeItems = data.data;
             activeContainer.innerHTML = activeItems.length === 0 
                 ? '<div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4 text-gray-300">No active simulations</div>' 
                 : activeItems.map(formatActiveItem).join('');
+            
+            // Update the active title with count
+            activeTitle.textContent = `Active Simulations (${activeItems.length})`;
         } else if (data.type === "LastFinished") {
             // Update last finished simulation display
             const lastFinished = data.data;
             noFinishedElement.style.display = 'none';
             const lastFinishedHTML = formatLastFinishedItem(lastFinished);
             
-            // Check if there's already a finished simulation displayed
-            const existingFinished = lastFinishedContainer.querySelector('div:not(#no-finished)');
-            if (existingFinished) {
-                existingFinished.outerHTML = lastFinishedHTML;
-            } else {
-                lastFinishedContainer.innerHTML = lastFinishedHTML;
+            // Instead of replacing, prepend the new finished simulation to the list
+            // Create a temporary container to parse the HTML
+            const tempDiv = document.createElement('div');
+            tempDiv.innerHTML = lastFinishedHTML;
+            const newElement = tempDiv.firstElementChild;
+            
+            // Remove the "no finished" element if it's there
+            if (noFinishedElement.parentNode === lastFinishedContainer) {
+                lastFinishedContainer.removeChild(noFinishedElement);
+            }
+            
+            // Prepend the new finished simulation
+            lastFinishedContainer.insertBefore(newElement, lastFinishedContainer.firstChild);
+            
+            // Keep only the latest 10 finished simulations
+            const finishedItems = lastFinishedContainer.querySelectorAll('.bg-gray-800');
+            if (finishedItems.length > 10) {
+                for (let i = 10; i < finishedItems.length; i++) {
+                    lastFinishedContainer.removeChild(finishedItems[i]);
+                }
             }
         } else if (data.type === "ClusterUtilizationUpdated") {
             // Update cluster utilization display
-            updateUtilization(data.data);
+            updateClusterUtilization(data.data);
+        } else if (data.type === "NamespaceUtilizationUpdated") {
+            // Update namespace utilization display
+            updateNamespaceUtilization(data.data);
         }
     });
 </script>

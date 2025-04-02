@@ -3,3 +3,4 @@ prefect/10ksim/
 **/ruby.yaml
 **/target/**
 **/lars_db.sqlite*
+.cursor/
