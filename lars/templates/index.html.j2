@@ -4,7 +4,18 @@
 
 {% block content %}
 <div class="container mx-auto px-4 py-8">
-    <h1 class="text-3xl font-bold mb-8">LARS Dashboard</h1>
+    <div class="flex justify-between items-center mb-8">
+        <h1 class="text-3xl font-bold">LARS Dashboard</h1>
+        <div class="flex items-center space-x-4">
+            <label for="time-dilation" class="font-medium text-gray-600 dark:text-gray-300">Time Dilation:</label>
+            <select id="time-dilation" class="bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-white rounded-md px-3 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="1">1x</option>
+                <option value="3">3x</option>
+                <option value="5">5x</option>
+                <option value="10">10x</option>
+            </select>
+        </div>
+    </div>
 
     <!-- Mock Submission Form -->
     <div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-6 mb-8">
@@ -65,6 +76,39 @@
 
 {% block scripts %}
 <script>
+    // Time dilation management
+    const timeDilationSelect = document.getElementById('time-dilation');
+    let currentTimeDilation = 1; // Default to 1x speed
+    
+    // Load saved time dilation or use default
+    if (localStorage.getItem('time-dilation')) {
+        currentTimeDilation = parseInt(localStorage.getItem('time-dilation'), 10);
+        timeDilationSelect.value = currentTimeDilation;
+    }
+    
+    // Send time dilation to server when changed
+    timeDilationSelect.addEventListener('change', () => {
+        currentTimeDilation = parseInt(timeDilationSelect.value, 10);
+        localStorage.setItem('time-dilation', currentTimeDilation);
+        
+        // Send to server
+        fetch('/set_time_dilation', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ factor: currentTimeDilation }),
+        })
+        .then(response => {
+            if (!response.ok) {
+                console.error('Failed to update time dilation');
+            }
+        })
+        .catch(error => {
+            console.error('Error sending time dilation:', error);
+        });
+    });
+
     // DOM elements
     const queueContainer = document.getElementById('queue-container');
     const activeContainer = document.getElementById('active-container');
@@ -98,12 +142,30 @@
     const autoSubmitButton = document.getElementById('auto-submit-button');
     let autoSubmitEnabled = false;
     let queueLength = 0;
+    let isSubmitting = false; // Track submission state
+    let autoSubmitTimeout = null;
 
     // Function to check queue size and add more simulations if needed
     function checkQueueAndSubmit() {
-        if (autoSubmitEnabled && queueLength < 3) {
+        // Don't submit if already in progress or not enabled
+        if (!autoSubmitEnabled || isSubmitting) {
+            return;
+        }
+        
+        if (queueLength < 3) {
             console.log("Queue low, automatically submitting more simulations");
-            submitMockSimulations();
+            
+            // Clear any existing timeout to avoid multiple submissions
+            if (autoSubmitTimeout) {
+                clearTimeout(autoSubmitTimeout);
+            }
+            
+            // Add small delay before submitting to avoid rapid-fire submissions
+            autoSubmitTimeout = setTimeout(() => {
+                if (autoSubmitEnabled && !isSubmitting) {
+                    submitMockSimulations();
+                }
+            }, 500);
         }
     }
 
@@ -111,6 +173,10 @@
         if (autoSubmitEnabled) {
             // Stop auto-submission
             autoSubmitEnabled = false;
+            if (autoSubmitTimeout) {
+                clearTimeout(autoSubmitTimeout);
+                autoSubmitTimeout = null;
+            }
             autoSubmitButton.textContent = 'Auto Submit';
             autoSubmitButton.classList.remove('bg-red-600', 'hover:bg-red-700');
             autoSubmitButton.classList.add('bg-green-600', 'hover:bg-green-700');
@@ -121,12 +187,14 @@
             autoSubmitButton.classList.remove('bg-green-600', 'hover:bg-green-700');
             autoSubmitButton.classList.add('bg-red-600', 'hover:bg-red-700');
             
-            // Submit immediately
-            submitMockSimulations();
+            // Submit immediately if not already submitting
+            if (!isSubmitting) {
+                submitMockSimulations();
+            }
         }
     });
 
-    // Function to submit mock simulations
+    // Modify the submit function to track submission state
     async function submitMockSimulations() {
         const count = parseInt(countInput.value, 10);
         const baseNodes = parseInt(baseNodesInput.value, 10);
@@ -141,8 +209,10 @@
             return;
         }
         
+        // Disable button to prevent double-submissions
         submitButton.disabled = true;
         submitButton.textContent = 'Submitting...';
+        isSubmitting = true; // Set submission flag
         
         try {
             const response = await fetch('/mock_submit', {
@@ -161,25 +231,29 @@
             }
             
             submitButton.textContent = 'Success!';
-            setTimeout(() => {
-                submitButton.disabled = false;
-                submitButton.textContent = 'Submit';
-            }, 1000);
         } catch (error) {
             console.error('Error submitting mock simulations:', error);
             submitButton.textContent = 'Error!';
+        } finally {
+            // Always re-enable the button after a short delay
             setTimeout(() => {
                 submitButton.disabled = false;
                 submitButton.textContent = 'Submit';
+                isSubmitting = false; // Clear submission flag
+                
+                // Check if we need to auto-submit again
+                checkQueueAndSubmit();
             }, 1000);
         }
     }
 
     // Format a queue item for display
     function formatQueueItem(item) {
+        // Calculate minutes from seconds
+        const durationMins = Math.round(item.params.duration_secs / 60);
         return `
             <div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4">
-                <h3 class="font-medium text-white">${item.params.chart} (${item.params.node_count} nodes, ${item.params.duration_mins} min)</h3>
+                <h3 class="font-medium text-white">${item.params.chart} (${item.params.node_count} nodes, ${durationMins} min)</h3>
                 <p class="text-gray-300">Predicted Cost: CPU: <span class="font-semibold">${item.predicted_cost.cpu_cores.toFixed(2)}</span> cores | Mem: <span class="font-semibold">${item.predicted_cost.memory_gb.toFixed(2)}</span> GB</p>
                 <p class="text-gray-400 text-xs mt-1">ID: ${item.request_id}</p>
             </div>
@@ -188,9 +262,11 @@
 
     // Format an active item for display
     function formatActiveItem(item) {
+        // Calculate minutes from seconds
+        const durationMins = Math.round(item.params.duration_secs / 60);
         return `
             <div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4">
-                <h3 class="font-medium text-white">${item.params.chart} (${item.params.node_count} nodes, ${item.params.duration_mins} min)</h3>
+                <h3 class="font-medium text-white">${item.params.chart} (${item.params.node_count} nodes, ${durationMins} min)</h3>
                 <p class="text-gray-300">Actual Cost: CPU: <span class="font-semibold">${item.actual_cost.cpu_cores.toFixed(2)}</span> cores | Mem: <span class="font-semibold">${item.actual_cost.memory_gb.toFixed(2)}</span> GB</p>
                 <p class="text-gray-400 text-xs">Predicted: ${item.predicted_cost.cpu_cores.toFixed(2)} / ${item.predicted_cost.memory_gb.toFixed(2)}</p>
                 <p class="text-gray-400 text-xs mt-1">ID: ${item.simulation_id}</p>
@@ -204,9 +280,12 @@
         const finishedDate = new Date(item.finished_at);
         const formattedDate = finishedDate.toLocaleString();
         
+        // Calculate minutes from seconds
+        const durationMins = Math.round(item.params.duration_secs / 60);
+        
         return `
             <div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4">
-                <h3 class="font-medium text-white">${item.params.chart} (${item.params.node_count} nodes, ${item.params.duration_mins} min)</h3>
+                <h3 class="font-medium text-white">${item.params.chart} (${item.params.node_count} nodes, ${durationMins} min)</h3>
                 <p class="text-gray-300">Final Cost: CPU: <span class="font-semibold">${item.actual_cost.cpu_cores.toFixed(2)}</span> cores | Mem: <span class="font-semibold">${item.actual_cost.memory_gb.toFixed(2)}</span> GB</p>
                 <p class="text-gray-400 text-xs">Predicted: ${item.predicted_cost.cpu_cores.toFixed(2)} / ${item.predicted_cost.memory_gb.toFixed(2)}</p>
                 <p class="text-gray-300 text-sm mt-2">Completed: ${formattedDate}</p>
@@ -367,76 +446,116 @@
     }
 
     // Setup EventSource for server-sent events
-    const evtSource = new EventSource("/status-stream");
+    let evtSource;
+    let connectionRetries = 0;
+    const MAX_RETRIES = 5;
     
-    evtSource.onopen = () => {
-        console.log("SSE connection established");
-    };
-    
-    evtSource.onerror = (error) => {
-        console.error("SSE connection error:", error);
-    };
-    
-    evtSource.addEventListener("message", (event) => {
-        const data = JSON.parse(event.data);
-        console.log("SSE message received:", data);
+    function setupSSE() {
+        // Close any existing connection
+        if (evtSource) {
+            evtSource.close();
+        }
         
-        // Handle different event types
-        if (data.type === "QueueUpdated") {
-            // Update queue display
-            const queueItems = data.data;
-            queueContainer.innerHTML = queueItems.length === 0 
-                ? '<div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4 text-gray-300">No simulations in queue</div>' 
-                : queueItems.map(formatQueueItem).join('');
+        evtSource = new EventSource("/status-stream");
+        
+        evtSource.onopen = () => {
+            console.log("SSE connection established");
+            connectionRetries = 0; // Reset retry counter on successful connection
+        };
+        
+        evtSource.onerror = (error) => {
+            console.error("SSE connection error:", error);
             
-            // Update the queued title with count
-            queuedTitle.textContent = `Queued Simulations (${queueItems.length})`;
-            
-            // Update queue length and check if we need to add more
-            queueLength = queueItems.length;
-            checkQueueAndSubmit();
-        } else if (data.type === "ActiveUpdated") {
-            // Update active simulations display
-            const activeItems = data.data;
-            activeContainer.innerHTML = activeItems.length === 0 
-                ? '<div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4 text-gray-300">No active simulations</div>' 
-                : activeItems.map(formatActiveItem).join('');
-            
-            // Update the active title with count
-            activeTitle.textContent = `Active Simulations (${activeItems.length})`;
-        } else if (data.type === "LastFinished") {
-            // Update last finished simulation display
-            const lastFinished = data.data;
-            noFinishedElement.style.display = 'none';
-            const lastFinishedHTML = formatLastFinishedItem(lastFinished);
-            
-            // Instead of replacing, prepend the new finished simulation to the list
-            // Create a temporary container to parse the HTML
-            const tempDiv = document.createElement('div');
-            tempDiv.innerHTML = lastFinishedHTML;
-            const newElement = tempDiv.firstElementChild;
-            
-            // Remove the "no finished" element if it's there
-            if (noFinishedElement.parentNode === lastFinishedContainer) {
-                lastFinishedContainer.removeChild(noFinishedElement);
-            }
-            
-            // Prepend the new finished simulation
-            lastFinishedContainer.insertBefore(newElement, lastFinishedContainer.firstChild);
-            
-            // Keep only the latest 10 finished simulations
-            const finishedItems = lastFinishedContainer.querySelectorAll('.bg-gray-800');
-            if (finishedItems.length > 10) {
-                for (let i = 10; i < finishedItems.length; i++) {
-                    lastFinishedContainer.removeChild(finishedItems[i]);
+            // Handle reconnection
+            if (evtSource.readyState === EventSource.CLOSED) {
+                if (connectionRetries < MAX_RETRIES) {
+                    connectionRetries++;
+                    const delay = Math.min(1000 * Math.pow(2, connectionRetries), 30000); // Exponential backoff with max 30s
+                    console.log(`SSE connection closed. Reconnecting in ${delay}ms (attempt ${connectionRetries})`);
+                    setTimeout(setupSSE, delay);
+                } else {
+                    console.error(`Failed to reconnect after ${MAX_RETRIES} attempts. Please refresh the page.`);
                 }
             }
-        } else if (data.type === "ClusterUtilizationUpdated") {
-            // Update cluster utilization display
-            updateClusterUtilization(data.data);
-        } else if (data.type === "NamespaceUtilizationUpdated") {
-            // Update namespace utilization display
-            updateNamespaceUtilization(data.data);
+        };
+        
+        evtSource.addEventListener("message", (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log("SSE message received:", data);
+                
+                // Handle different event types
+                if (data.type === "QueueUpdated") {
+                    // Update queue display
+                    const queueItems = data.data;
+                    queueContainer.innerHTML = queueItems.length === 0 
+                        ? '<div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4 text-gray-300">No simulations in queue</div>' 
+                        : queueItems.map(formatQueueItem).join('');
+                    
+                    // Update the queued title with count
+                    queuedTitle.textContent = `Queued Simulations (${queueItems.length})`;
+                    
+                    // Update queue length and check if we need to add more
+                    queueLength = queueItems.length;
+                    checkQueueAndSubmit();
+                } else if (data.type === "ActiveUpdated") {
+                    // Update active simulations display
+                    const activeItems = data.data;
+                    activeContainer.innerHTML = activeItems.length === 0 
+                        ? '<div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4 text-gray-300">No active simulations</div>' 
+                        : activeItems.map(formatActiveItem).join('');
+                    
+                    // Update the active title with count
+                    activeTitle.textContent = `Active Simulations (${activeItems.length})`;
+                } else if (data.type === "LastFinished") {
+                    // Update last finished simulation display
+                    const lastFinished = data.data;
+                    noFinishedElement.style.display = 'none';
+                    const lastFinishedHTML = formatLastFinishedItem(lastFinished);
+                    
+                    // Instead of replacing, prepend the new finished simulation to the list
+                    // Create a temporary container to parse the HTML
+                    const tempDiv = document.createElement('div');
+                    tempDiv.innerHTML = lastFinishedHTML;
+                    const newElement = tempDiv.firstElementChild;
+                    
+                    // Remove the "no finished" element if it's there
+                    if (noFinishedElement.parentNode === lastFinishedContainer) {
+                        lastFinishedContainer.removeChild(noFinishedElement);
+                    }
+                    
+                    // Prepend the new finished simulation
+                    lastFinishedContainer.insertBefore(newElement, lastFinishedContainer.firstChild);
+                    
+                    // Keep only the latest 10 finished simulations
+                    const finishedItems = lastFinishedContainer.querySelectorAll('.bg-gray-800');
+                    if (finishedItems.length > 10) {
+                        for (let i = 10; i < finishedItems.length; i++) {
+                            lastFinishedContainer.removeChild(finishedItems[i]);
+                        }
+                    }
+                } else if (data.type === "ClusterUtilizationUpdated") {
+                    // Update cluster utilization display
+                    updateClusterUtilization(data.data);
+                } else if (data.type === "NamespaceUtilizationUpdated") {
+                    // Update namespace utilization display
+                    updateNamespaceUtilization(data.data);
+                }
+            } catch (error) {
+                console.error("Error processing SSE message:", error);
+            }
+        });
+    }
+    
+    // Initialize the SSE connection
+    setupSSE();
+    
+    // Add event listener for page visibility changes to handle reconnection
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && 
+            (!evtSource || evtSource.readyState === EventSource.CLOSED)) {
+            console.log("Page became visible, reconnecting SSE");
+            setupSSE();
         }
     });
 </script>

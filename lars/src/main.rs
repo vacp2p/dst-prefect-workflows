@@ -25,6 +25,8 @@ use std::env;
 use axum::debug_handler;
 use chrono::{DateTime, Utc};
 use reqwest;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 // --- Data Structures ---
 
@@ -32,21 +34,19 @@ use reqwest;
 pub struct SimulationParams {
     pub chart: String,
     pub node_count: u32,
-    pub duration_mins: u32,
+    pub duration_secs: u32,
 }
 
 impl SimulationParams {
-    fn history_key(&self) -> String {
-        format!("{}:{}", self.chart, self.node_count)
-    }
+    // Removed unused history_key method
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, FromRow)]
-struct ResourceCost {
+pub struct ResourceCost {
     #[sqlx(rename = "cpu_cores")]
-    cpu_cores: f32,
+    pub cpu_cores: f32,
     #[sqlx(rename = "memory_gb")]
-    memory_gb: f32,
+    pub memory_gb: f32,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -78,6 +78,7 @@ struct LastFinishedSimulation {
     predicted_cost: ResourceCost,
     actual_cost: ResourceCost,
     finished_at: chrono::DateTime<chrono::Utc>,
+    duration_secs: u32,
 }
 
 // Default implementation for ResourceCost
@@ -127,12 +128,22 @@ pub struct QueuedSimulation {
     pub predicted_cost: ResourceCost,
 }
 
+// Define a new struct for resource usage snapshots
+#[derive(Serialize, Clone, Debug)]
+pub struct ResourceSnapshot {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub cpu_cores: f32,
+    pub memory_gb: f32,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct ActiveSimulation {
     pub simulation_id: Uuid,
     pub params: SimulationParams,
     pub predicted_cost: ResourceCost,
     pub actual_cost: ResourceCost,
+    pub usage_snapshots: Vec<ResourceSnapshot>, // Historical snapshots during simulation
+    pub last_snapshot_time: chrono::DateTime<chrono::Utc>, // Track when last snapshot was taken
 }
 
 // Add struct for history entries
@@ -140,7 +151,7 @@ pub struct ActiveSimulation {
 pub struct CostHistoryEntry {
     chart: String,
     node_count: u32,
-    duration_mins: u32,
+    duration_secs: u32,
     cpu_cores: f32,
     memory_gb: f32,
     observed_at: DateTime<Utc>,
@@ -162,7 +173,7 @@ enum AppEvent {
 struct HistoryEntry {
     chart: String,
     node_count: i64,
-    duration_mins: i64,
+    duration_secs: i64,
     cpu_cores: f64,
     memory_gb: f64,
     observed_at: chrono::DateTime<chrono::Utc>,
@@ -170,21 +181,19 @@ struct HistoryEntry {
 
 // Structure to hold Kubernetes metrics
 #[derive(Debug, Clone)]
-struct KubernetesMetrics {
+pub struct KubernetesMetrics {
     // Cluster metrics
-    cluster_total_cpu: f32,
-    cluster_used_cpu: f32,
-    cluster_total_memory_gb: f32,
-    cluster_used_memory_gb: f32,
+    pub cluster_total_cpu: f32,
+    pub cluster_used_cpu: f32,
+    pub cluster_total_memory_gb: f32,
+    pub cluster_used_memory_gb: f32,
     
     // Namespace metrics (our simulations namespace)
-    namespace: String,
-    namespace_cpu_requests: f32,
-    namespace_cpu_limits: f32,
-    namespace_memory_requests_gb: f32,
-    namespace_memory_limits_gb: f32,
-    namespace_used_cpu: f32,
-    namespace_used_memory_gb: f32,
+    pub namespace: String,
+    pub namespace_cpu_limits: f32,
+    pub namespace_memory_limits_gb: f32,
+    pub namespace_used_cpu: f32,
+    pub namespace_used_memory_gb: f32,
 }
 
 impl Default for KubernetesMetrics {
@@ -196,9 +205,7 @@ impl Default for KubernetesMetrics {
             cluster_used_memory_gb: 0.0,
             
             namespace: "larstesting".to_string(),
-            namespace_cpu_requests: 0.0,
             namespace_cpu_limits: 256.0,  // Default max CPU for namespace
-            namespace_memory_requests_gb: 0.0,
             namespace_memory_limits_gb: 1024.0, // Default max memory for namespace
             namespace_used_cpu: 0.0,
             namespace_used_memory_gb: 0.0,
@@ -215,18 +222,20 @@ struct PrometheusResponse {
 
 #[derive(Deserialize, Debug, Clone)]
 struct PrometheusData {
-    #[serde(rename = "resultType")]
-    result_type: String,
     result: Vec<PrometheusResult>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 struct PrometheusResult {
-    metric: serde_json::Value,
     value: (f64, String),  // Timestamp and value
 }
 
 // --- Application State ---
+
+#[derive(Default)]
+struct SchedulerState {
+    mock_completion_timers: HashMap<Uuid, tokio::time::Instant>,
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -238,6 +247,8 @@ struct AppState {
     namespace_utilization: Arc<Mutex<NamespaceUtilization>>,
     db_pool: SqlitePool,
     event_sender: broadcast::Sender<AppEvent>,
+    scheduler_state: Arc<Mutex<SchedulerState>>, // New field for thread-safe scheduler state
+    time_dilation: Arc<Mutex<u32>>, // Time dilation factor
 }
 
 // --- Handlers ---
@@ -350,20 +361,41 @@ async fn mock_submit_handler(
     Json(payload): Json<MockSubmitRequest>,
 ) -> impl IntoResponse {
     tracing::info!("Received mock submit request: {:?}", payload);
+    
+    // Create a Send-compatible RNG that can safely cross await points
+    let mut rng = StdRng::from_entropy();
+    
+    // Acquire lock on queue once
     let mut queue = state.queued_simulations.lock().await;
     let db_pool = &state.db_pool;
-    let mut newly_predicted_costs = HashMap::new();
+    
+    // Prepare to collect all simulations so we can add them at once
+    let mut new_simulations = Vec::with_capacity(payload.count as usize);
 
     for i in 0..payload.count {
-        let node_count = payload.base_nodes + rand::thread_rng().gen_range(0..100) * (i + 1);
-        let duration_mins = rand::thread_rng().gen_range(5..15);
+        // Generate all random values using the same RNG instance
+        let node_count = payload.base_nodes + rng.gen_range(0..100) * (i + 1);
+        let minutes = rng.gen_range(3..=15);
+        let duration_secs = minutes * 60; // Convert minutes to seconds
+        let chart_num = rng.gen_range(1..4);
+        let cpu_per_node = 0.18 + (rng.gen::<f32>() * 0.04 - 0.02);
+        let memory_per_node = 0.05 + (rng.gen::<f32>() * 0.02 - 0.01);
+        
         let params = SimulationParams {
-            chart: format!("mock-chart-{}", rand::thread_rng().gen_range(1..4)),
+            chart: format!("mock-chart-{}", chart_num),
             node_count,
-            duration_mins,
+            duration_secs,
         };
 
-        // --- Predict cost using DB or default ---
+        // Calculate sanity check cost (using our RNG)
+        let sanity_check_cost = ResourceCost {
+            cpu_cores: params.node_count as f32 * cpu_per_node,
+            memory_gb: params.node_count as f32 * memory_per_node,
+        };
+        
+        tracing::debug!(chart = %params.chart, nodes = %params.node_count, duration = %params.duration_secs, cost = ?sanity_check_cost, "Calculated sanity check cost");
+        
+        // --- Predict cost using DB lookup with sanity check --- 
         let predicted_cost_result: Result<Option<ResourceCost>, sqlx::Error> = sqlx::query_as(
             "SELECT cpu_cores, memory_gb FROM cost_history WHERE chart = ? AND node_count = ? ORDER BY observed_at DESC LIMIT 1"
         )
@@ -373,59 +405,54 @@ async fn mock_submit_handler(
         .await;
 
         let predicted_cost = match predicted_cost_result {
-            Ok(Some(cost)) => {
-                tracing::info!(chart = %params.chart, nodes = %params.node_count, cost = ?cost, "Found historical cost in DB");
-                cost
-            }
-            Ok(None) => {
-                // Create RNG only when needed
-                let mut rng = rand::thread_rng();
+            Ok(Some(historical_cost)) => {
+                // Check if historical cost is within a reasonable range (0.5x to 2.0x) of sanity check
+                let cpu_ratio = if sanity_check_cost.cpu_cores > 0.0 { historical_cost.cpu_cores / sanity_check_cost.cpu_cores } else { 1.0 };
+                let mem_ratio = if sanity_check_cost.memory_gb > 0.0 { historical_cost.memory_gb / sanity_check_cost.memory_gb } else { 1.0 };
                 
-                // Calculate more realistic resource requirements
-                // For reference: 10,000 nodes would use about 1812 vCPUs (user provided info)
-                // So approximately 0.18 CPU cores per node, with some variation
-                let cpu_per_node = 0.18 + (rng.gen::<f32>() * 0.04 - 0.02); // 0.16-0.20 CPU per node
-                let memory_per_node = 0.05 + (rng.gen::<f32>() * 0.02 - 0.01); // 0.04-0.06 GB per node
+                // Define acceptable range (allow some variance)
+                const MIN_RATIO: f32 = 0.5;
+                const MAX_RATIO: f32 = 2.0;
                 
-                let default_cost = ResourceCost {
-                    cpu_cores: node_count as f32 * cpu_per_node,
-                    memory_gb: node_count as f32 * memory_per_node,
-                };
-                tracing::info!(chart = %params.chart, nodes = %params.node_count, cost = ?default_cost, "No history found, using default predicted cost");
-                newly_predicted_costs.insert((params.chart.clone(), params.node_count), default_cost.clone());
-                default_cost
-            }
-            Err(e) => {
-                tracing::error!(chart = %params.chart, nodes = %params.node_count, "DB error fetching cost: {}. Using default.", e);
-                // Create RNG only when needed
-                let mut rng = rand::thread_rng();
-                
-                // Same realistic CPU/memory calculations as above
-                let cpu_per_node = 0.18 + (rng.gen::<f32>() * 0.04 - 0.02); // 0.16-0.20 CPU per node
-                let memory_per_node = 0.05 + (rng.gen::<f32>() * 0.02 - 0.01); // 0.04-0.06 GB per node
-                
-                ResourceCost {
-                    cpu_cores: node_count as f32 * cpu_per_node,
-                    memory_gb: node_count as f32 * memory_per_node,
+                if cpu_ratio >= MIN_RATIO && cpu_ratio <= MAX_RATIO && mem_ratio >= MIN_RATIO && mem_ratio <= MAX_RATIO {
+                    tracing::info!(chart = %params.chart, nodes = %params.node_count, cost = ?historical_cost, "Using historical cost from DB (within sanity range)");
+                    historical_cost
+                } else {
+                    tracing::warn!(chart = %params.chart, nodes = %params.node_count, historical = ?historical_cost, sanity = ?sanity_check_cost, "Historical cost out of range ({:.2}x CPU, {:.2}x Mem). Using sanity check cost.", cpu_ratio, mem_ratio);
+                    sanity_check_cost // Use sanity check cost if historical is unreasonable
                 }
             }
+            Ok(None) => {
+                tracing::info!(chart = %params.chart, nodes = %params.node_count, cost = ?sanity_check_cost, "No history found, using sanity check cost");
+                sanity_check_cost // Use sanity check cost if no history
+            }
+            Err(e) => {
+                tracing::error!(chart = %params.chart, nodes = %params.node_count, "DB error fetching cost: {}. Using sanity check cost.", e);
+                sanity_check_cost // Use sanity check cost on DB error
+            }
         };
-        // -------------------------------------------
 
         let queued_sim = QueuedSimulation {
             request_id: Uuid::new_v4(),
             params,
-            predicted_cost,
+            predicted_cost, // Use the chosen predicted cost
         };
 
-        queue.push_back(queued_sim);
+        // Add to our collection instead of directly to queue
+        new_simulations.push(queued_sim);
+    }
+    
+    // Now add all simulations to the queue at once
+    for sim in new_simulations {
+        queue.push_back(sim);
     }
 
-    // Optionally: Persist newly predicted costs if desired (outside the loop for efficiency)
-    // for ((chart, node_count), cost) in newly_predicted_costs { ... INSERT query ... }
-
     // Broadcast the queue update
-    let _ = state.event_sender.send(AppEvent::QueueUpdated(queue.iter().cloned().collect()));
+    let queue_updated: Vec<QueuedSimulation> = queue.iter().cloned().collect();
+    drop(queue); // Release lock before sending broadcast
+    
+    // Send after dropping the lock to avoid potential deadlocks
+    let _ = state.event_sender.send(AppEvent::QueueUpdated(queue_updated));
     tracing::info!("Added {} mock simulations to queue and broadcasted update", payload.count);
 
     StatusCode::OK
@@ -459,7 +486,7 @@ async fn api_history_handler(State(state): State<AppState>) -> impl IntoResponse
         SELECT 
             chart, 
             node_count, 
-            duration_mins,
+            duration_secs,
             cpu_cores, 
             memory_gb, 
             observed_at
@@ -475,7 +502,7 @@ async fn api_history_handler(State(state): State<AppState>) -> impl IntoResponse
             HistoryEntry {
                 chart: row.get("chart"),
                 node_count: row.get("node_count"),
-                duration_mins: row.get("duration_mins"),
+                duration_secs: row.get("duration_secs"),
                 cpu_cores: row.get("cpu_cores"),
                 memory_gb: row.get("memory_gb"),
                 observed_at: chrono::DateTime::parse_from_rfc3339(&row.get::<String, _>("observed_at"))
@@ -652,6 +679,189 @@ async fn update_utilization_from_k8s(state: AppState) -> Result<(), Box<dyn std:
     }
 }
 
+// Adding this between scheduler code and monitoring task:
+async fn try_schedule_simulations(state: &AppState, queue: &mut VecDeque<QueuedSimulation>) -> bool {
+    // If queue is empty, nothing to do
+    if queue.is_empty() {
+        return false;
+    }
+
+    let _rng = StdRng::from_entropy(); // Changed to _rng to indicate intentionally unused
+    let mut active_updated = false;
+    
+    // Get cluster utilization once at the beginning
+    let (current_cpu_percent, used_cpu_cores, total_cpu_cores, used_memory_gb, total_memory_gb) = {
+        let cluster_util = state.cluster_utilization.lock().await;
+        (
+            cluster_util.cpu_percent,
+            cluster_util.used_cpu_cores,
+            cluster_util.total_cpu_cores,
+            cluster_util.used_memory_gb,
+            cluster_util.total_memory_gb
+        )
+    };
+    
+    // Log current cluster state before scheduling
+    tracing::info!(
+        "Current cluster state before scheduling - CPU: {:.1}% ({:.1}/{:.1} cores), Memory: {:.1}% ({:.1}/{:.1} GB), Queue size: {}",
+        current_cpu_percent,
+        used_cpu_cores,
+        total_cpu_cores,
+        (used_memory_gb / total_memory_gb) * 100.0,
+        used_memory_gb,
+        total_memory_gb,
+        queue.len()
+    );
+    
+    // Process entire queue if possible - no artificial limits
+    let items_to_process = queue.len();
+    
+    // Pre-screen simulations to move to active state
+    let mut to_activate = Vec::with_capacity(items_to_process);
+    
+    // Track cumulative resource impact of all simulations we're considering
+    let mut cumulative_cpu_cores = used_cpu_cores;
+    let mut cumulative_memory_gb = used_memory_gb;
+    
+    // First pass: determine which simulations can be moved to active state
+    // Track cumulative impact to avoid oversubscription
+    for _ in 0..items_to_process {
+        if let Some(next_sim) = queue.front() {
+            // Always check resource constraints for every simulation
+            let predicted_cpu = next_sim.predicted_cost.cpu_cores;
+            let predicted_memory = next_sim.predicted_cost.memory_gb;
+            
+            // Calculate what would happen if we admit this simulation
+            let new_total_cpu = cumulative_cpu_cores + predicted_cpu;
+            let new_total_memory = cumulative_memory_gb + predicted_memory;
+            
+            // Calculate new percentages
+            let new_cpu_percent = (new_total_cpu / total_cpu_cores) * 100.0;
+            let new_memory_percent = (new_total_memory / total_memory_gb) * 100.0;
+            
+            // Make admission decision based on projected resource usage
+            // Lower thresholds to be more conservative
+            let cpu_ok = new_cpu_percent <= 80.0; // Reduced to 80%
+            let memory_ok = new_memory_percent <= 85.0; // Reduced from 95% to 85%
+            
+            if !cpu_ok {
+                tracing::info!(
+                    "Admitting next simulation would exceed CPU capacity ({:.1}% -> {:.1}%), pausing admission", 
+                    (cumulative_cpu_cores / total_cpu_cores) * 100.0,
+                    new_cpu_percent
+                );
+                break;
+            }
+            
+            if !memory_ok {
+                tracing::info!(
+                    "Admitting next simulation would exceed memory capacity ({:.1}% -> {:.1}%), pausing admission", 
+                    (cumulative_memory_gb / total_memory_gb) * 100.0,
+                    new_memory_percent
+                );
+                break;
+            }
+            
+            // This simulation can be admitted, pop it from queue
+            if let Some(sim) = queue.pop_front() {
+                // Update our cumulative tracking of resource usage
+                cumulative_cpu_cores += predicted_cpu;
+                cumulative_memory_gb += predicted_memory;
+                
+                // Add to activation list
+                to_activate.push(sim);
+            }
+        } else {
+            break; // Queue is empty
+        }
+    }
+    
+    // If we're activating simulations, log the projected impact
+    if !to_activate.is_empty() {
+        let final_cpu_percent = (cumulative_cpu_cores / total_cpu_cores) * 100.0;
+        let final_memory_percent = (cumulative_memory_gb / total_memory_gb) * 100.0;
+        
+        tracing::info!(
+            "Moving {} simulations from queue to active. Projected impact: CPU {:.1}% -> {:.1}%, Memory {:.1}% -> {:.1}%",
+            to_activate.len(),
+            current_cpu_percent,
+            final_cpu_percent,
+            (used_memory_gb / total_memory_gb) * 100.0,
+            final_memory_percent
+        );
+        
+        // Second pass: actually move simulations to active state
+        for queued_sim in to_activate {
+            let sim_id = Uuid::new_v4();
+            
+            // Create active simulation record
+            let active_sim = ActiveSimulation {
+                simulation_id: sim_id,
+                params: queued_sim.params.clone(),
+                predicted_cost: queued_sim.predicted_cost.clone(),
+                actual_cost: queued_sim.predicted_cost.clone(),
+                usage_snapshots: Vec::new(),
+                last_snapshot_time: chrono::Utc::now(),
+            };
+            
+            // Add to active simulations
+            state.active_simulations.lock().await.insert(sim_id, active_sim.clone());
+            
+            // Add to completion timers
+            {
+                let mut sched_state = state.scheduler_state.lock().await;
+                sched_state.mock_completion_timers.insert(sim_id, tokio::time::Instant::now());
+            }
+            
+            tracing::debug!(
+                simulation_id = %sim_id, 
+                chart = %queued_sim.params.chart,
+                nodes = %queued_sim.params.node_count,
+                duration = %queued_sim.params.duration_secs,
+                cpu = %queued_sim.predicted_cost.cpu_cores,
+                memory = %queued_sim.predicted_cost.memory_gb,
+                "Simulation moved from queue to active state"
+            );
+            
+            active_updated = true;
+        }
+    } else if !queue.is_empty() {
+        // If we couldn't schedule any simulations but there are items in the queue
+        tracing::info!(
+            "Not scheduling any simulations from queue due to resource constraints. Current usage: CPU {:.1}%, Memory {:.1}%",
+            current_cpu_percent,
+            (used_memory_gb / total_memory_gb) * 100.0
+        );
+    }
+    
+    active_updated
+}
+
+// Add the time dilation request struct
+#[derive(Deserialize)]
+struct TimeDilationRequest {
+    factor: u32,
+}
+
+// Add handler for setting time dilation
+async fn set_time_dilation_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<TimeDilationRequest>,
+) -> impl IntoResponse {
+    let mut time_dilation = state.time_dilation.lock().await;
+    
+    // Validate and apply the time dilation factor
+    let factor = match payload.factor {
+        1 | 3 | 5 | 10 => payload.factor, // Only allow 1x, 3x, 5x, or 10x
+        _ => 1, // Default to 1x for invalid values
+    };
+    
+    *time_dilation = factor;
+    tracing::info!("Time dilation set to {}x", factor);
+    
+    StatusCode::OK
+}
+
 // --- Main Function ---
 
 #[tokio::main]
@@ -712,33 +922,232 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         namespace_utilization: Arc::new(Mutex::new(NamespaceUtilization::default())),
         db_pool,
         event_sender,
+        scheduler_state: Arc::new(Mutex::new(SchedulerState { mock_completion_timers: HashMap::new() })),
+        time_dilation: Arc::new(Mutex::new(1)), // Default time dilation factor
     };
+
+    // --- Mock Scheduler Task (Using DB) ---
+    let scheduler_state = state.clone();
+    tokio::spawn(async move {
+        // Increase frequency for faster processing when we have lots of simulations
+        let mut interval = tokio::time::interval(Duration::from_secs(5)); 
+        
+        loop {
+            interval.tick().await;
+
+            // Initialize tracking variables
+            let mut queue_updated = false;
+            let mut active_updated = false;
+            
+            // Get the current queue state
+            let mut queue = scheduler_state.queued_simulations.lock().await;
+            let initial_queue_size = queue.len();
+            let db_pool = &scheduler_state.db_pool;
+            
+            tracing::debug!("Scheduler tick - current queue size: {}", initial_queue_size);
+
+            // Process completions in batches to handle thousands of active simulations efficiently
+            let time_dilation = *scheduler_state.time_dilation.lock().await;
+            let now = tokio::time::Instant::now();
+            
+            // 1. Get all completion candidates in one pass
+            let mut completed_ids = Vec::new();
+            let mut completed_sim_data = Vec::new();
+            
+            {
+                // Scan all active simulations for completions
+                let sched_state = scheduler_state.scheduler_state.lock().await;
+                let active_sims = scheduler_state.active_simulations.lock().await;
+                
+                // Pre-allocate a large enough vector when we have many active simulations
+                completed_ids.reserve(active_sims.len() / 4); // Assume ~25% might be complete
+                
+                for (id, start_time) in &sched_state.mock_completion_timers {
+                    if let Some(sim) = active_sims.get(id) {
+                        // Apply time dilation to make simulations run faster
+                        let duration_with_dilation = Duration::from_secs(sim.params.duration_secs as u64 / time_dilation as u64);
+                        if now.duration_since(*start_time) >= duration_with_dilation {
+                            completed_ids.push(*id);
+                        }
+                    }
+                }
+                
+                tracing::debug!("Found {} simulations to complete out of {} active", 
+                    completed_ids.len(), active_sims.len());
+            }
+
+            // 2. Process the completions
+            if !completed_ids.is_empty() {
+                // Get write access to process completions
+                let mut active_sims = scheduler_state.active_simulations.lock().await;
+                let mut sched_state = scheduler_state.scheduler_state.lock().await;
+                
+                // Reserve space for completed simulation data
+                completed_sim_data.reserve(completed_ids.len());
+                
+                for id in &completed_ids {
+                    if let Some(completed_sim) = active_sims.remove(id) {
+                        sched_state.mock_completion_timers.remove(id);
+                        active_updated = true;
+                        
+                        // Update last finished simulation
+                        let last_finished = LastFinishedSimulation {
+                            simulation_id: *id,
+                            params: completed_sim.params.clone(),
+                            predicted_cost: completed_sim.predicted_cost.clone(),
+                            actual_cost: completed_sim.actual_cost.clone(),
+                            finished_at: chrono::Utc::now(),
+                            duration_secs: completed_sim.params.duration_secs,
+                        };
+                        
+                        // Update last finished simulation in state
+                        *scheduler_state.last_finished_simulation.lock().await = Some(last_finished.clone());
+                        
+                        // Broadcast last finished simulation update
+                        let _ = scheduler_state.event_sender.send(AppEvent::LastFinished(last_finished));
+                        
+                        // Collect data needed for DB insert
+                        completed_sim_data.push((completed_sim.params.clone(), completed_sim.actual_cost.clone()));
+                    }
+                }
+                
+                tracing::info!("Processed {} completed simulations", completed_ids.len());
+                
+                // Log detailed stats for select completed simulations when handling many
+                if completed_ids.len() > 10 {
+                    tracing::info!("Large batch completion: processed {} simulations", completed_ids.len());
+                } else {
+                    // Log detailed stats for individual simulations when we have fewer
+                    for (i, (params, cost)) in completed_sim_data.iter().enumerate().take(5) {
+                        tracing::info!(
+                            index = i,
+                            chart = %params.chart,
+                            nodes = %params.node_count,
+                            duration = %params.duration_secs,
+                            cpu = %cost.cpu_cores,
+                            memory = %cost.memory_gb,
+                            "Simulation completed"
+                        );
+                    }
+                }
+            }
+
+            // 3. Store data in the database - batch insert if possible
+            if !completed_sim_data.is_empty() {
+                // Add all completed simulations to the DB
+                for (params, cost) in &completed_sim_data {
+                    let query_result = sqlx::query(
+                        "INSERT OR REPLACE INTO cost_history (chart, node_count, duration_secs, cpu_cores, memory_gb, observed_at) VALUES (?, ?, ?, ?, ?, datetime('now'))"
+                    )
+                    .bind(&params.chart)
+                    .bind(params.node_count)
+                    .bind(params.duration_secs)
+                    .bind(cost.cpu_cores)
+                    .bind(cost.memory_gb)
+                    .execute(db_pool)
+                    .await;
+
+                    if let Err(e) = query_result {
+                        tracing::error!(chart = %params.chart, nodes = %params.node_count, "Failed to store cost in DB: {}", e);
+                    }
+                }
+                
+                tracing::info!("Stored {} simulation records in the database", completed_sim_data.len());
+            }
+
+            // 4. Schedule new simulations from queue
+            if !queue.is_empty() {
+                if try_schedule_simulations(&scheduler_state, &mut queue).await {
+                    active_updated = true;
+                    
+                    if queue.len() != initial_queue_size {
+                        queue_updated = true;
+                        tracing::info!("Queue size changed from {} to {} after scheduling", 
+                             initial_queue_size, queue.len());
+                    }
+                }
+            }
+
+            // 5. Broadcast updates efficiently
+            if queue_updated {
+                let current_queue: Vec<QueuedSimulation> = queue.iter().cloned().collect();
+                drop(queue); // Release lock before broadcasting
+                
+                if let Err(e) = scheduler_state.event_sender.send(AppEvent::QueueUpdated(current_queue)) {
+                    tracing::error!("Failed to broadcast queue update: {}", e);
+                }
+            } else {
+                drop(queue); // Release lock if we didn't use it for broadcasting
+            }
+            
+            if active_updated {
+                let current_active = scheduler_state.active_simulations.lock().await.values().cloned().collect();
+                
+                if let Err(e) = scheduler_state.event_sender.send(AppEvent::ActiveUpdated(current_active)) {
+                    tracing::error!("Failed to broadcast active simulations update: {}", e);
+                }
+            }
+        }
+    });
 
     // --- Mock Monitoring Task ---
     let monitor_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5)); // Update every 5 seconds
+        let snapshot_interval = Duration::from_secs(30); // Take snapshots every 30 seconds
+        
         loop {
             interval.tick().await;
             
             // Update actual costs for all active simulations first
             {
                 let mut active_sims = monitor_state.active_simulations.lock().await;
-                let cluster_util = monitor_state.cluster_utilization.lock().await;
+                let _cluster_util = monitor_state.cluster_utilization.lock().await; // Prefix with _ to indicate intentionally unused
+                let mut updated = false;
+                let now = chrono::Utc::now();
                 
                 for sim in active_sims.values_mut() {
-                    // Apply realistic variation with small jitter
-                    let cpu_jitter = 0.85 + rand::random::<f32>() * 0.3; // 85% to 115% variation
-                    let mem_jitter = 0.9 + rand::random::<f32>() * 0.2;  // 90% to 110% variation
+                    // Create a Send-compatible RNG for each simulation
+                    let mut local_rng = StdRng::from_entropy();
+                    
+                    // Apply realistic variation with jitter that only increases resource usage
+                    let cpu_jitter = 1.0 + local_rng.gen_range(0.0..=0.2); // 1.0-1.2x (only increase)
+                    let mem_jitter = 1.0 + local_rng.gen_range(0.0..=0.15); // 1.0-1.15x (only increase)
                     
                     // Calculate actual cost based on predicted cost + jitter
-                    // Removed the efficiency multiplier which was causing exponential growth
-                    sim.actual_cost.cpu_cores = sim.predicted_cost.cpu_cores * cpu_jitter;
-                    sim.actual_cost.memory_gb = sim.predicted_cost.memory_gb * mem_jitter;
+                    let current_cpu_cores = sim.predicted_cost.cpu_cores * cpu_jitter;
+                    let current_memory_gb = sim.predicted_cost.memory_gb * mem_jitter;
+                    
+                    // Update current actual cost
+                    sim.actual_cost.cpu_cores = current_cpu_cores;
+                    sim.actual_cost.memory_gb = current_memory_gb;
+                    
+                    // Check if it's time to take a snapshot (every 30 seconds)
+                    let time_since_last = now.signed_duration_since(sim.last_snapshot_time);
+                    if time_since_last.num_seconds() >= snapshot_interval.as_secs() as i64 {
+                        // Take a snapshot of current resource usage
+                        sim.usage_snapshots.push(ResourceSnapshot {
+                            timestamp: now,
+                            cpu_cores: current_cpu_cores,
+                            memory_gb: current_memory_gb,
+                        });
+                        
+                        // Update last snapshot time
+                        sim.last_snapshot_time = now;
+                        
+                        tracing::debug!(
+                            simulation_id = %sim.simulation_id,
+                            snapshot_count = sim.usage_snapshots.len(),
+                            "Resource snapshot taken: CPU={:.2} cores, Memory={:.2} GB",
+                            current_cpu_cores, current_memory_gb
+                        );
+                    }
+                    
+                    updated = true;
                 }
                 
-                // If there are active simulations, broadcast an update
-                if !active_sims.is_empty() {
+                // If there were updates, broadcast them
+                if updated && !active_sims.is_empty() {
                     let active_list: Vec<ActiveSimulation> = active_sims.values().cloned().collect();
                     let _ = monitor_state.event_sender.send(AppEvent::ActiveUpdated(active_list));
                 }
@@ -795,149 +1204,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // --- Mock Scheduler Task (Using DB) ---
-    let scheduler_state = state.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
-        let mut mock_completion_timers: HashMap<Uuid, tokio::time::Instant> = HashMap::new();
-
-        loop {
-            interval.tick().await;
-            tracing::debug!("Scheduler tick");
-
-            let mut queue = scheduler_state.queued_simulations.lock().await;
-            let mut active_sims = scheduler_state.active_simulations.lock().await;
-            let db_pool = &scheduler_state.db_pool;
-            let mut queue_updated = false;
-            let mut active_updated = false;
-
-            // 1. Check for completions
-            let now = tokio::time::Instant::now();
-            let mut completed_ids = Vec::new();
-            let mut completed_sim_data = Vec::new(); // Store data for DB update
-
-            for (id, start_time) in &mock_completion_timers {
-                if let Some(sim) = active_sims.get(id) {
-                    let duration = Duration::from_secs(sim.params.duration_mins as u64 * 5);
-                    if now.duration_since(*start_time) >= duration {
-                        completed_ids.push(*id);
-                    }
-                }
-            }
-
-            // Remove from active sims and collect data for DB update
-            for id in completed_ids {
-                if let Some(completed_sim) = active_sims.remove(&id) {
-                    mock_completion_timers.remove(&id);
-                    tracing::info!(simulation_id = %id, "Mock simulation completed");
-                    active_updated = true;
-                    
-                    // Update last finished simulation
-                    let last_finished = LastFinishedSimulation {
-                        simulation_id: id,
-                        params: completed_sim.params.clone(),
-                        predicted_cost: completed_sim.predicted_cost.clone(),
-                        actual_cost: completed_sim.actual_cost.clone(),
-                        finished_at: chrono::Utc::now(),
-                    };
-                    
-                    // Update last finished simulation in state
-                    *scheduler_state.last_finished_simulation.lock().await = Some(last_finished.clone());
-                    
-                    // Broadcast last finished simulation update
-                    let _ = scheduler_state.event_sender.send(AppEvent::LastFinished(last_finished));
-                    
-                    // Collect data needed for DB insert
-                    completed_sim_data.push((completed_sim.params.clone(), completed_sim.actual_cost.clone()));
-                }
-            }
-            // --- Drop active_sims lock before potential DB operations ---
-            drop(active_sims);
-
-            // --- Store final costs in DB (using runtime-checked query) ---
-            for (params, cost) in completed_sim_data {
-                let query_result = sqlx::query(
-                    "INSERT OR REPLACE INTO cost_history (chart, node_count, duration_mins, cpu_cores, memory_gb, observed_at) VALUES (?, ?, ?, ?, ?, datetime('now'))"
-                )
-                .bind(&params.chart)
-                .bind(params.node_count)
-                .bind(params.duration_mins)
-                .bind(cost.cpu_cores)
-                .bind(cost.memory_gb)
-                .execute(db_pool)
-                .await;
-
-                match query_result {
-                    Ok(_) => tracing::info!(chart = %params.chart, nodes = %params.node_count, cost = ?cost, "Stored final cost in DB"),
-                    Err(e) => tracing::error!(chart = %params.chart, nodes = %params.node_count, "Failed to store cost in DB: {}", e),
-                }
-            }
-            // --------------------------------------------------------
-
-            // 2. Try to schedule new simulations
-            while !queue.is_empty() {
-                // Check current CPU usage - only admit if usage is below 80%
-                let cluster_util = scheduler_state.cluster_utilization.lock().await;
-                if cluster_util.cpu_percent >= 80.0 {
-                    tracing::info!("Current CPU usage at {}%, pausing admissions", cluster_util.cpu_percent);
-                    break; // Stop admitting new simulations
-                }
-                
-                // Also check if admitting would exceed 100% (prevent overcommit)
-                if let Some(next_sim) = queue.front() {
-                    let predicted_cpu = next_sim.predicted_cost.cpu_cores;
-                    let total_cpu_if_admitted = cluster_util.used_cpu_cores + predicted_cpu;
-                    let percent_if_admitted = (total_cpu_if_admitted / cluster_util.total_cpu_cores) * 100.0;
-                    
-                    if percent_if_admitted > 99.0 {
-                        tracing::info!("Admitting next simulation would exceed CPU capacity ({}%), pausing", percent_if_admitted);
-                        break;
-                    }
-                }
-                
-                // Release the lock before continuing
-                drop(cluster_util);
-                
-                if let Some(queued_sim) = queue.pop_front() {
-                    queue_updated = true;
-                    active_updated = true; // Need to broadcast active update too
-
-                    let sim_id = Uuid::new_v4();
-                    let active_sim = ActiveSimulation {
-                        simulation_id: sim_id,
-                        params: queued_sim.params.clone(),
-                        predicted_cost: queued_sim.predicted_cost.clone(),
-                        actual_cost: ResourceCost::default(),
-                    };
-                    // Lock active sims again just for insertion
-                    scheduler_state.active_simulations.lock().await.insert(sim_id, active_sim.clone());
-                    mock_completion_timers.insert(sim_id, tokio::time::Instant::now());
-
-                    tracing::info!(simulation_id = %sim_id, params = ?active_sim.params, "Mock simulation approved and started");
-                } else {
-                    break;
-                }
-            }
-
-            // Drop queue lock before broadcast
-            drop(queue);
-
-            // Broadcast updates
-            if queue_updated {
-                 // Lock queue again just for reading the current state
-                let current_queue = scheduler_state.queued_simulations.lock().await.iter().cloned().collect();
-                let _ = scheduler_state.event_sender.send(AppEvent::QueueUpdated(current_queue));
-                 tracing::debug!("Sent QueueUpdated event via broadcast (scheduler)");
-            }
-            if active_updated {
-                 // Lock active sims again just for reading the current state
-                 let current_active = scheduler_state.active_simulations.lock().await.values().cloned().collect();
-                 let _ = scheduler_state.event_sender.send(AppEvent::ActiveUpdated(current_active));
-                 tracing::debug!("Sent ActiveUpdated event via broadcast (scheduler)");
-            }
-        }
-    });
-
     // Build our application router
     let mut app = Router::new()
         // Conditionally register the correct root handler
@@ -952,6 +1218,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/status-stream", get(sse_handler))
         // --- Mocking Routes ---
         .route("/mock_submit", post(mock_submit_handler))
+        // --- Time Dilation Route ---
+        .route("/set_time_dilation", post(set_time_dilation_handler))
         // --- Static Files & State ---
         .nest_service("/static", ServeDir::new("static"))
         // Add history page route

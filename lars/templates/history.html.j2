@@ -35,11 +35,12 @@
 
     function formatHistoryRow(entry) {
         const observedDate = new Date(entry.observed_at).toLocaleString();
+        const durationMins = Math.round(entry.duration_secs / 60);
         return `
             <tr>
                 <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">${entry.chart}</td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${entry.node_count}</td>
-                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${entry.duration_mins}</td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${durationMins}</td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${entry.cpu_cores.toFixed(2)}</td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${entry.memory_gb.toFixed(2)}</td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${observedDate}</td>
