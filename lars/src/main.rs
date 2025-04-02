@@ -460,18 +460,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Mock Monitoring Task (Unchanged) ---
     let monitor_state = state.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        let mut interval = tokio::time::interval(Duration::from_secs(1)); // Update more frequently
         loop {
             interval.tick().await;
             let mut active_sims = monitor_state.active_simulations.lock().await;
             let mut updated = false;
 
+            // Calculate total resource usage for cluster metrics
+            let mut total_cpu = 0.0;
+            let mut total_memory = 0.0;
+
             // Simulate cost changes for active simulations
             for sim in active_sims.values_mut() {
-                // Very simple mock update: fluctuate around predicted cost
-                sim.actual_cost.cpu_cores = sim.predicted_cost.cpu_cores * (0.8 + rand::random::<f32>() * 0.4);
-                sim.actual_cost.memory_gb = sim.predicted_cost.memory_gb * (0.7 + rand::random::<f32>() * 0.6);
+                // Very simple mock update: fluctuate around predicted cost with some randomness
+                let cpu_fluctuation = (0.8 + rand::random::<f32>() * 0.4); // 80% to 120% of predicted
+                let mem_fluctuation = (0.7 + rand::random::<f32>() * 0.6); // 70% to 130% of predicted
+                
+                sim.actual_cost.cpu_cores = sim.predicted_cost.cpu_cores * cpu_fluctuation;
+                sim.actual_cost.memory_gb = sim.predicted_cost.memory_gb * mem_fluctuation;
+                
+                // Add to cluster totals
+                total_cpu += sim.actual_cost.cpu_cores;
+                total_memory += sim.actual_cost.memory_gb;
                 updated = true;
+            }
+
+            // Update cluster utilization metrics
+            if active_sims.len() > 0 {
+                let mut util = monitor_state.cluster_utilization.lock().await;
+                util.used_cpu_cores = total_cpu;
+                util.used_memory_gb = total_memory;
+                util.cpu_percent = (total_cpu / util.total_cpu_cores) * 100.0;
+                util.memory_percent = (total_memory / util.total_memory_gb) * 100.0;
+                
+                // Send utilization update
+                let _ = monitor_state.event_sender.send(AppEvent::ClusterUtilizationUpdated(util.clone()));
+                tracing::debug!("Sent ClusterUtilizationUpdated event: CPU {:.1}%, Memory {:.1}%", 
+                    util.cpu_percent, util.memory_percent);
             }
 
             if updated {
@@ -479,7 +504,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let active_list: Vec<ActiveSimulation> = active_sims.values().cloned().collect();
                 // Send update event - ignore error if no receivers yet
                 let _ = monitor_state.event_sender.send(AppEvent::ActiveUpdated(active_list));
-                 tracing::debug!("Sent ActiveUpdated event via broadcast");
+                tracing::debug!("Sent ActiveUpdated event via broadcast");
             }
         }
     });
@@ -543,30 +568,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // --- Drop active_sims lock before potential DB operations ---
             drop(active_sims);
-
-            // --- Update cluster utilization ---
-            {
-                let active_sims = scheduler_state.active_simulations.lock().await;
-                let mut util = scheduler_state.cluster_utilization.lock().await;
-                
-                // Calculate total resource usage from active simulations
-                let mut total_cpu = 0.0;
-                let mut total_memory = 0.0;
-                
-                for sim in active_sims.values() {
-                    total_cpu += sim.actual_cost.cpu_cores;
-                    total_memory += sim.actual_cost.memory_gb;
-                }
-                
-                // Update utilization metrics
-                util.used_cpu_cores = total_cpu;
-                util.used_memory_gb = total_memory;
-                util.cpu_percent = (total_cpu / util.total_cpu_cores) * 100.0;
-                util.memory_percent = (total_memory / util.total_memory_gb) * 100.0;
-                
-                // Broadcast utilization update
-                let _ = scheduler_state.event_sender.send(AppEvent::ClusterUtilizationUpdated(util.clone()));
-            }
 
             // --- Store final costs in DB (using runtime-checked query) ---
             for (params, cost) in completed_sim_data {
