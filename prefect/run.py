@@ -5,8 +5,11 @@ import base64
 import requests
 import json
 import os
-from dotenv import load_dotenv
+import tempfile
+import subprocess
+import yaml
 import time
+from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
@@ -240,7 +243,12 @@ def call_lars_api(endpoint: str, payload: dict):
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
-        return response.json()
+        # Check if there's content before trying to parse JSON
+        if response.content and len(response.content.strip()) > 0:
+            return response.json()
+        else:
+            # Some endpoints like report_start just return a status code with no body
+            return {"status": "success"}
     except requests.exceptions.RequestException as e:
         print(f"Error calling LARS API {endpoint}: {e}")
         raise
@@ -434,144 +442,149 @@ def deploy_config(config: dict):
         }
     
     # Write values.yaml to a temporary file
-    values_file = f"/tmp/values-{release_name}.yaml"
-    with open(values_file, 'w') as f:
-        yaml.dump(values, f)
-    
-    # Check if helm is installed, install if not
+    fd, values_file = tempfile.mkstemp(suffix='.yaml')
     try:
-        subprocess.run(["helm", "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        print("Helm is already installed")
-    except (subprocess.SubprocessError, FileNotFoundError):
-        print("Installing Helm...")
-        subprocess.run("curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3", shell=True)
-        subprocess.run("chmod 700 get_helm.sh", shell=True)
-        subprocess.run("./get_helm.sh", shell=True)
-    
-    # Deploy with Helm
-    namespace = "larstesting"
-    chart_version = "0.4.6" if chart == "waku" else "0.1.0"
-    chart_url = f"https://github.com/vacp2p/dst-argo-workflows/raw/refs/heads/main/charts/{chart}-{chart_version}.tgz"
-    
-    # Create namespace if it doesn't exist
-    try:
-        subprocess.run(["kubectl", "create", "namespace", namespace], 
-                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        print(f"Created namespace {namespace}")
-    except subprocess.SubprocessError as e:
-        print(f"Note: {namespace} namespace might already exist: {e}")
+        with os.fdopen(fd, 'w') as temp_file:
+            yaml.dump(values, temp_file)
         
-    helm_cmd = [
-        "helm", "upgrade", "--install", release_name,
-        chart_url,
-        "-f", values_file,
-        "--namespace", namespace
-    ]
-    
-    print(f"Running Helm command: {' '.join(helm_cmd)}")
-    start_time_deploy = datetime.now()
-    deploy_success = False
-    try:
-        deploy_result = subprocess.run(helm_cmd, capture_output=True, text=True, check=True)
-        print(f"Helm deployment initiated successfully: {deploy_result.stdout}")
-        deploy_success = True
-    except subprocess.CalledProcessError as e:
-        print(f"Error initiating Helm deployment: {e.stderr}")
-        print(f"Helm output: {e.stdout}")
-        return None
+        # Check if helm is installed, install if not
+        try:
+            subprocess.run(["helm", "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            print("Helm is already installed")
+        except (subprocess.SubprocessError, FileNotFoundError):
+            print("Installing Helm...")
+            subprocess.run("curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3", shell=True)
+            subprocess.run("chmod 700 get_helm.sh", shell=True)
+            subprocess.run("./get_helm.sh", shell=True)
+        
+        # Deploy with Helm
+        namespace = "larstesting"
+        chart_version = "0.4.6" if chart == "waku" else "0.1.0"
+        chart_url = f"https://github.com/vacp2p/dst-argo-workflows/raw/refs/heads/main/charts/{chart}-{chart_version}.tgz"
+        
+        # Create namespace if it doesn't exist
+        try:
+            subprocess.run(["kubectl", "create", "namespace", namespace], 
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            print(f"Created namespace {namespace}")
+        except subprocess.SubprocessError as e:
+            print(f"Note: {namespace} namespace might already exist: {e}")
+        
+        helm_cmd = [
+            "helm", "upgrade", "--install", release_name,
+            chart_url,
+            "-f", values_file,
+            "--namespace", namespace
+        ]
+        
+        print(f"Running Helm command: {' '.join(helm_cmd)}")
+        start_time_deploy = datetime.now()
+        deploy_success = False
+        try:
+            deploy_result = subprocess.run(helm_cmd, capture_output=True, text=True, check=True)
+            print(f"Helm deployment initiated successfully: {deploy_result.stdout}")
+            deploy_success = True
+        except subprocess.CalledProcessError as e:
+            print(f"Error initiating Helm deployment: {e.stderr}")
+            print(f"Helm output: {e.stdout}")
+            return None
 
-    # --- 2. Report Start to LARS --- 
-    if deploy_success:
-        print(f"Reporting start to LARS for Simulation ID: {simulation_id}")
-        # Payload now only contains ID and descriptive info
-        report_start_payload = {
+        # --- 2. Report Start to LARS --- 
+        if deploy_success:
+            print(f"Reporting start to LARS for Simulation ID: {simulation_id}")
+            # Payload now only contains ID and descriptive info
+            report_start_payload = {
+                "simulation_id": simulation_id,
+                # LARS already knows the predicted cost from the request_run phase
+                # "actual_cpu": ???,  <-- Removed
+                # "actual_memory": ???, <-- Removed
+                "chart": chart_type,
+                "node_count": node_count,
+                "duration_secs": duration_secs,
+            }
+            try:
+                call_lars_api("/api/v1/report_start", report_start_payload)
+                print("Successfully reported start to LARS.")
+            except Exception as e:
+                print(f"Warning: Failed to report start to LARS: {e}. Continuing simulation run.")
+                # Consider adding logic here if reporting start is absolutely critical
+
+        # Wait for StatefulSet (if deploy was initiated)
+        if deploy_success:
+            print(f"Waiting for StatefulSet {release_name}-nodes to be ready...")
+            rollout_cmd = [
+                "kubectl", "rollout", "status",
+                "--watch",
+                "--timeout=300s",
+                f"statefulset/{release_name}-nodes",
+                "-n", namespace
+            ]
+            try:
+                rollout_result = subprocess.run(rollout_cmd, capture_output=True, text=True, check=True)
+                print(f"StatefulSet {release_name}-nodes is ready.")
+                start_time_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            except subprocess.CalledProcessError as e:
+                print(f"Error waiting for StatefulSet: {e.stderr}. Proceeding with cleanup.")
+                start_time_actual = start_time_deploy.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            print("Skipping rollout wait as deployment failed to initiate.")
+            start_time_actual = start_time_deploy.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Wait for specified duration (only if deployment was attempted)
+        end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if deploy_success:
+            duration_seconds = config.get("duration", 5) * 60
+            print(f"Waiting for simulation duration: {config.get('duration', 5)} minutes ({duration_seconds} seconds)...")
+            
+            chunk_size = 60 
+            chunks = duration_seconds // chunk_size
+            remainder = duration_seconds % chunk_size
+            for i in range(chunks):
+                time.sleep(chunk_size)
+                print(f"Progress: {(i+1)*chunk_size}/{duration_seconds} seconds elapsed")
+            if remainder > 0:
+                time.sleep(remainder)
+                print(f"Progress: {duration_seconds}/{duration_seconds} seconds elapsed")
+            
+            end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"Finished simulation duration at: {end_time}")
+        else:
+            print("Skipping simulation duration wait as deployment failed.")
+
+        # --- 3. Report Completion to LARS --- 
+        print(f"Reporting completion to LARS for Simulation ID: {simulation_id}")
+        report_complete_payload = {
             "simulation_id": simulation_id,
-            # LARS already knows the predicted cost from the request_run phase
-            # "actual_cpu": ???,  <-- Removed
-            # "actual_memory": ???, <-- Removed
-            "chart": chart_type,
-            "node_count": node_count,
-            "duration_secs": duration_secs,
+            "final_cpu_cores": None,
+            "final_memory_gb": None,
         }
         try:
-            call_lars_api("/api/v1/report_start", report_start_payload)
-            print("Successfully reported start to LARS.")
+            call_lars_api("/api/v1/report_complete", report_complete_payload)
+            print("Successfully reported completion to LARS.")
         except Exception as e:
-            print(f"Warning: Failed to report start to LARS: {e}. Continuing simulation run.")
-            # Consider adding logic here if reporting start is absolutely critical
+            print(f"Warning: Failed to report completion to LARS: {e}. State in LARS might be inconsistent.")
 
-    # Wait for StatefulSet (if deploy was initiated)
-    if deploy_success:
-        print(f"Waiting for StatefulSet {release_name}-nodes to be ready...")
-        rollout_cmd = [
-            "kubectl", "rollout", "status",
-            "--watch",
-            "--timeout=300s",
-            f"statefulset/{release_name}-nodes",
-            "-n", namespace
-        ]
+        # Cleanup (always attempt cleanup)
+        print(f"Cleaning up deployment {release_name}...")
+        cleanup_cmd = ["helm", "uninstall", release_name, "--namespace", namespace]
         try:
-            rollout_result = subprocess.run(rollout_cmd, capture_output=True, text=True, check=True)
-            print(f"StatefulSet {release_name}-nodes is ready.")
-            start_time_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cleanup_result = subprocess.run(cleanup_cmd, capture_output=True, text=True, check=True)
+            print(f"Successfully cleaned up deployment {release_name}.")
         except subprocess.CalledProcessError as e:
-            print(f"Error waiting for StatefulSet: {e.stderr}. Proceeding with cleanup.")
-            start_time_actual = start_time_deploy.strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        print("Skipping rollout wait as deployment failed to initiate.")
-        start_time_actual = start_time_deploy.strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Wait for specified duration (only if deployment was attempted)
-    end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    if deploy_success:
-        duration_seconds = config.get("duration", 5) * 60
-        print(f"Waiting for simulation duration: {config.get('duration', 5)} minutes ({duration_seconds} seconds)...")
+            print(f"Warning: Error during Helm cleanup: {e.stderr}")
+
+        # Return data needed for analysis (even if deployment failed, might have partial data)
+        simulation_data_result = [
+            start_time_actual, 
+            end_time, 
+            release_name
+        ]
         
-        chunk_size = 60 
-        chunks = duration_seconds // chunk_size
-        remainder = duration_seconds % chunk_size
-        for i in range(chunks):
-            time.sleep(chunk_size)
-            print(f"Progress: {(i+1)*chunk_size}/{duration_seconds} seconds elapsed")
-        if remainder > 0:
-            time.sleep(remainder)
-            print(f"Progress: {duration_seconds}/{duration_seconds} seconds elapsed")
-        
-        end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"Finished simulation duration at: {end_time}")
-    else:
-        print("Skipping simulation duration wait as deployment failed.")
-
-    # --- 3. Report Completion to LARS --- 
-    print(f"Reporting completion to LARS for Simulation ID: {simulation_id}")
-    report_complete_payload = {
-        "simulation_id": simulation_id,
-        "final_cpu_cores": None,
-        "final_memory_gb": None,
-    }
-    try:
-        call_lars_api("/api/v1/report_complete", report_complete_payload)
-        print("Successfully reported completion to LARS.")
-    except Exception as e:
-        print(f"Warning: Failed to report completion to LARS: {e}. State in LARS might be inconsistent.")
-
-    # Cleanup (always attempt cleanup)
-    print(f"Cleaning up deployment {release_name}...")
-    cleanup_cmd = ["helm", "uninstall", release_name, "--namespace", namespace]
-    try:
-        cleanup_result = subprocess.run(cleanup_cmd, capture_output=True, text=True, check=True)
-        print(f"Successfully cleaned up deployment {release_name}.")
-    except subprocess.CalledProcessError as e:
-        print(f"Warning: Error during Helm cleanup: {e.stderr}")
-
-    # Return data needed for analysis (even if deployment failed, might have partial data)
-    simulation_data_result = [
-        start_time_actual, 
-        end_time, 
-        release_name
-    ]
-    
-    return simulation_data_result
+        return simulation_data_result
+    finally:
+        # Clean up the temporary file
+        os.unlink(values_file)
+        print("Cleaned up temporary values file")
 
 @task
 def run_analysis(simulation_data: list):
