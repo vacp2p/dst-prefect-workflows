@@ -496,11 +496,10 @@ def deploy_config(config: dict):
             report_start_payload = {
                 "simulation_id": simulation_id,
                 # LARS already knows the predicted cost from the request_run phase
-                # "actual_cpu": ???,  <-- Removed
-                # "actual_memory": ???, <-- Removed
                 "chart": chart_type,
                 "node_count": node_count,
                 "duration_secs": duration_secs,
+                "release_name": release_name
             }
             try:
                 call_lars_api("/api/v1/report_start", report_start_payload)

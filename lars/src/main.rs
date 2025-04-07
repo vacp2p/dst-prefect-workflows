@@ -27,6 +27,7 @@ use chrono::{DateTime, Utc};
 use reqwest;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use urlencoding;
 
 // --- Data Structures ---
 
@@ -165,6 +166,7 @@ pub struct ActiveSimulation {
     pub monetary_cost_eur_predicted: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monetary_cost_eur_actual: Option<f32>,
+    pub release_name: String, // Add release_name to track deployments
 }
 
 // Add struct for history entries
@@ -273,6 +275,7 @@ pub struct ReportStartPayload {
     chart: String,
     node_count: u32,
     duration_secs: u32,
+    release_name: String, // Add release_name to track the deployment
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -326,11 +329,25 @@ struct AppState {
 async fn root_handler_debug(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let reloader = state.templates.lock().await;
-    let env = reloader.acquire_env().unwrap();
-    let tmpl = env.get_template("index.html.j2").unwrap();
-    let html = tmpl.render(context! {}).unwrap();
-    Html(html).into_response()
+    // Get the templates reloader
+    let mut reloader = state.templates.lock().await;
+    
+    // Render the template with proper error handling
+    let result = (|| {
+        let env = reloader.acquire_env()?;
+        let tmpl = env.get_template("index.html.j2")?;
+        let html = tmpl.render(context! {})?;
+        Ok::<_, minijinja::Error>(html)
+    })();
+    
+    // Handle the result
+    match result {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            tracing::error!("Template rendering error: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Template rendering error").into_response()
+        }
+    }
 }
 
 // Release version of the root handler
@@ -338,33 +355,73 @@ async fn root_handler_debug(
 async fn root_handler_release(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let reloader = state.templates.lock().await;
-    let env = reloader.acquire_env().unwrap();
-    let tmpl = env.get_template("index.html.j2").unwrap();
-    let html = tmpl.render(context! {}).unwrap();
-    Html(html).into_response()
+    // Get the templates reloader
+    let mut reloader = state.templates.lock().await;
+    
+    // Render the template with proper error handling
+    let result = (|| {
+        let env = reloader.acquire_env()?;
+        let tmpl = env.get_template("index.html.j2")?;
+        let html = tmpl.render(context! {})?;
+        Ok::<_, minijinja::Error>(html)
+    })();
+    
+    // Handle the result
+    match result {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            tracing::error!("Template rendering error: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Template rendering error").into_response()
+        }
+    }
 }
 
 // History Page Handlers
 #[cfg(debug_assertions)]
 async fn history_handler_debug(State(state): State<AppState>) -> impl IntoResponse {
-    let reloader = state.templates.lock().await;
-    let env = reloader.acquire_env().unwrap();
-    let tmpl = env.get_template("history.html.j2").unwrap();
-    Html(tmpl.render(context! {}).unwrap()).into_response()
+    // Get the templates reloader
+    let mut reloader = state.templates.lock().await;
+    
+    // Render the template with proper error handling
+    let result = (|| {
+        let env = reloader.acquire_env()?;
+        let tmpl = env.get_template("history.html.j2")?;
+        let html = tmpl.render(context! {})?;
+        Ok::<_, minijinja::Error>(html)
+    })();
+    
+    // Handle the result
+    match result {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            tracing::error!("Template rendering error: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Template rendering error").into_response()
+        }
+    }
 }
 
 #[cfg(not(debug_assertions))]
 async fn history_handler_release(State(state): State<AppState>) -> impl IntoResponse {
-    let reloader = state.templates.lock().await;
-    let env = reloader.acquire_env().unwrap();
-    let tmpl = env.get_template("history.html.j2").unwrap();
-    Html(tmpl.render(context! {}).unwrap()).into_response()
+    // Get the templates reloader
+    let mut reloader = state.templates.lock().await;
+    
+    // Render the template with proper error handling
+    let result = (|| {
+        let env = reloader.acquire_env()?;
+        let tmpl = env.get_template("history.html.j2")?;
+        let html = tmpl.render(context! {})?;
+        Ok::<_, minijinja::Error>(html)
+    })();
+    
+    // Handle the result
+    match result {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            tracing::error!("Template rendering error: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Template rendering error").into_response()
+        }
+    }
 }
-
-// ... (Other handlers like api_history_handler, sse_handler, mock_submit_handler, 
-//      set_time_dilation_handler, request_run_handler, report_start_handler, 
-//      report_complete_handler should already be defined here) ...
 
 // --- External API Handlers ---
 
@@ -587,7 +644,8 @@ async fn report_start_handler(
         monetary_cost_eur_predicted: Some(calculate_monetary_cost(&predicted_cost, payload.duration_secs)),
         monetary_cost_eur_actual: Some(calculate_monetary_cost(&actual_cost, payload.duration_secs)),
         usage_snapshots: Vec::new(), 
-        last_snapshot_time: chrono::Utc::now(), 
+        last_snapshot_time: chrono::Utc::now(),
+        release_name: payload.release_name, // Store the release name for resource monitoring
     };
 
     // Add to active simulations map
@@ -628,11 +686,32 @@ async fn report_complete_handler(
     let completed_sim_opt = state.active_simulations.lock().await.remove(&sim_id);
 
     if let Some(completed_sim) = completed_sim_opt {
-        // Determine final costs
-        let final_cost = ResourceCost {
-            cpu_cores: payload.final_cpu_cores.unwrap_or(completed_sim.actual_cost.cpu_cores),
-            memory_gb: payload.final_memory_gb.unwrap_or(completed_sim.actual_cost.memory_gb),
-            monetary_cost_eur: None,
+        // Use the actual measured cost from snapshots if available
+        // otherwise fallback to provided values or default to the current actual_cost
+        let final_cost = if !completed_sim.usage_snapshots.is_empty() {
+            // Use the most recent snapshot for final values
+            let latest_snapshot = &completed_sim.usage_snapshots[completed_sim.usage_snapshots.len() - 1];
+            tracing::info!(%sim_id, 
+                "Using latest measured resource values from snapshots: CPU: {:.2} cores, Memory: {:.2} GB", 
+                latest_snapshot.cpu_cores, latest_snapshot.memory_gb);
+            
+            ResourceCost {
+                cpu_cores: latest_snapshot.cpu_cores,
+                memory_gb: latest_snapshot.memory_gb,
+                monetary_cost_eur: None,
+            }
+        } else if payload.final_cpu_cores.is_some() || payload.final_memory_gb.is_some() {
+            // Use provided values from payload if present
+            tracing::info!(%sim_id, "Using values from payload for final cost");
+            ResourceCost {
+                cpu_cores: payload.final_cpu_cores.unwrap_or(completed_sim.actual_cost.cpu_cores),
+                memory_gb: payload.final_memory_gb.unwrap_or(completed_sim.actual_cost.memory_gb),
+                monetary_cost_eur: None,
+            }
+        } else {
+            // Fallback to current actual_cost
+            tracing::info!(%sim_id, "No snapshots or payload values available, using current actual_cost");
+            completed_sim.actual_cost.clone()
         };
 
         // Update last finished simulation
@@ -676,7 +755,9 @@ async fn report_complete_handler(
         if let Err(e) = query_result {
             tracing::error!(%sim_id, chart = %params.chart, nodes = %params.node_count, "Failed to store final cost in DB: {}", e);
         } else {
-            tracing::info!(%sim_id, "Stored final cost for external simulation in DB");
+            tracing::info!(%sim_id, 
+                "Stored final cost for simulation in DB. CPU: {:.2} cores, Memory: {:.2} GB", 
+                final_cost.cpu_cores, final_cost.memory_gb);
         }
 
         StatusCode::OK
@@ -733,7 +814,7 @@ async fn api_history_handler(State(state): State<AppState>) -> impl IntoResponse
 async fn sse_handler(State(state): State<AppState>) -> impl IntoResponse {
     tracing::info!("SSE client connected");
     let mut rx = state.event_sender.subscribe();
-    
+
     // --- Send Initial State with Costs --- 
     let initial_queue_deque = state.queued_simulations.lock().await;
     let initial_queue_with_cost: Vec<QueuedSimulation> = initial_queue_deque.iter().map(|sim| {
@@ -1101,6 +1182,7 @@ async fn process_next_simulation_from_queue(state: &AppState) -> Result<bool, Bo
             &next_sim.predicted_cost,
             next_sim.params.duration_secs
         )),
+        release_name: format!("{}-{}", next_sim.params.chart, next_sim.params.node_count), // Generate a temporary release name
     };
     
     // Add to active simulations
@@ -1325,6 +1407,175 @@ async fn fetch_prometheus_metrics(namespace: &str) -> Result<KubernetesMetrics, 
     Ok(metrics)
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MeasureUsagePayload {
+    simulation_id: Uuid,
+    release_name: String,
+    namespace: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MeasureUsageResponse {
+    simulation_id: Uuid,
+    cpu_cores: f32,
+    memory_gb: f32,
+    success: bool,
+    message: Option<String>,
+}
+
+#[debug_handler]
+async fn measure_simulation_usage(
+    State(state): State<AppState>,
+    Json(payload): Json<MeasureUsagePayload>,
+) -> impl IntoResponse {
+    tracing::info!("Measuring actual usage for simulation {}: in namespace {}, release {}",
+                  payload.simulation_id, payload.namespace, payload.release_name);
+    
+    // Check if this simulation is active
+    let sim_id = payload.simulation_id;
+    let mut active_guard = match state.active_simulations.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(MeasureUsageResponse {
+                simulation_id: sim_id,
+                cpu_cores: 0.0,
+                memory_gb: 0.0,
+                success: false,
+                message: Some("Could not acquire lock on active simulations".to_string()),
+            })).into_response();
+        }
+    };
+    
+    let active_sim = match active_guard.get_mut(&sim_id) {
+        Some(sim) => sim,
+        None => {
+            drop(active_guard);
+            return (StatusCode::NOT_FOUND, Json(MeasureUsageResponse {
+                simulation_id: sim_id,
+                cpu_cores: 0.0,
+                memory_gb: 0.0,
+                success: false,
+                message: Some("Simulation not found in active simulations".to_string()),
+            })).into_response();
+        }
+    };
+    
+    // Use Prometheus to get actual resource usage
+    let usage_result = match fetch_simulation_usage(&payload.namespace, &payload.release_name).await {
+        Ok(usage) => {
+            // Update the simulation with actual usage
+            active_sim.actual_cost.cpu_cores = usage.cpu_cores;
+            active_sim.actual_cost.memory_gb = usage.memory_gb;
+            
+            // Add a new snapshot of resource usage
+            active_sim.usage_snapshots.push(ResourceSnapshot {
+                timestamp: chrono::Utc::now(),
+                cpu_cores: usage.cpu_cores,
+                memory_gb: usage.memory_gb,
+            });
+            active_sim.last_snapshot_time = chrono::Utc::now();
+            
+            // Calculate monetary cost based on actual usage
+            active_sim.monetary_cost_eur_actual = Some(calculate_monetary_cost(
+                &active_sim.actual_cost,
+                active_sim.params.duration_secs
+            ));
+            
+            MeasureUsageResponse {
+                simulation_id: sim_id,
+                cpu_cores: usage.cpu_cores,
+                memory_gb: usage.memory_gb,
+                success: true,
+                message: None,
+            }
+        },
+        Err(e) => {
+            tracing::warn!("Failed to measure actual usage for simulation {}: {}", sim_id, e);
+            MeasureUsageResponse {
+                simulation_id: sim_id,
+                cpu_cores: active_sim.actual_cost.cpu_cores, // Return current values
+                memory_gb: active_sim.actual_cost.memory_gb,
+                success: false,
+                message: Some(format!("Failed to measure usage: {}", e)),
+            }
+        }
+    };
+    
+    // Get a copy of active simulations for broadcasting
+    let active_sims = active_guard.values().cloned().collect::<Vec<ActiveSimulation>>();
+    drop(active_guard);
+    
+    // Broadcast active simulation update
+    let _ = state.event_sender.send(AppEvent::ActiveUpdated(active_sims));
+    
+    Json(usage_result).into_response()
+}
+
+// Helper struct for simulation usage
+struct SimulationUsage {
+    cpu_cores: f32,
+    memory_gb: f32,
+}
+
+// Fetch the resource usage for a specific simulation release from Prometheus
+async fn fetch_simulation_usage(namespace: &str, release_name: &str) -> Result<SimulationUsage, Box<dyn std::error::Error + Send + Sync>> {
+    let prometheus_url = "https://metrics.riff.cc/select/0/prometheus/api/v1/";
+    let http_client = reqwest::Client::new();
+    
+    // Escape special characters in release name for the Prometheus query
+    let release_name_escaped = release_name.replace("-", "\\-");
+    
+    // CPU query: Get the sum of CPU usage for all pods with this release name in the namespace
+    let cpu_query = format!(
+        "sum(rate(container_cpu_usage_seconds_total{{namespace=\"{}\", pod=~\"{}.*\"}}[1m]))",
+        namespace, release_name_escaped
+    );
+    
+    let cpu_query_url = format!("{}query?query={}", prometheus_url, urlencoding::encode(&cpu_query));
+    
+    let response = http_client.get(&cpu_query_url).send().await?;
+    if !response.status().is_success() {
+        return Err(format!("Prometheus request failed for CPU: {}", response.status()).into());
+    }
+    
+    let prom_response: PrometheusResponse = response.json().await?;
+    let cpu_cores = if prom_response.status == "success" && !prom_response.data.result.is_empty() {
+        prom_response.data.result[0].value.1.parse::<f32>().unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    
+    // Memory query: Get the sum of memory usage for all pods with this release name in the namespace
+    let memory_query = format!(
+        "sum(container_memory_working_set_bytes{{namespace=\"{}\", pod=~\"{}.*\"}}) / (1024*1024*1024)",
+        namespace, release_name_escaped
+    );
+    
+    let memory_query_url = format!("{}query?query={}", prometheus_url, urlencoding::encode(&memory_query));
+    
+    let response = http_client.get(&memory_query_url).send().await?;
+    if !response.status().is_success() {
+        return Err(format!("Prometheus request failed for Memory: {}", response.status()).into());
+    }
+    
+    let prom_response: PrometheusResponse = response.json().await?;
+    let memory_gb = if prom_response.status == "success" && !prom_response.data.result.is_empty() {
+        prom_response.data.result[0].value.1.parse::<f32>().unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    
+    tracing::info!(
+        "Measured actual usage for {}/{}: CPU cores: {:.2}, Memory GB: {:.2}",
+        namespace, release_name, cpu_cores, memory_gb
+    );
+    
+    Ok(SimulationUsage {
+        cpu_cores,
+        memory_gb,
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
@@ -1386,9 +1637,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState {
         templates: Arc::new(Mutex::new(templates_reloader)), // Now in scope
-        queued_simulations: Arc::new(Mutex::new(VecDeque::new())), 
-        active_simulations: Arc::new(Mutex::new(HashMap::new())), 
-        last_finished_simulation: Arc::new(Mutex::new(None)), 
+        queued_simulations: Arc::new(Mutex::new(VecDeque::new())),
+        active_simulations: Arc::new(Mutex::new(HashMap::new())),
+        last_finished_simulation: Arc::new(Mutex::new(None)),
         cluster_utilization: Arc::new(Mutex::new(ClusterUtilization::default())),
         namespace_utilization: Arc::new(Mutex::new(NamespaceUtilization::default())),
         db_pool, // Now in scope
@@ -1431,12 +1682,98 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         let state = monitor_state_clone; // Renamed for clarity
         loop {
-            // ... existing monitor logic, using `state` ...
-            // Pass the cloned state correctly
+            // Update overall cluster utilization
             if let Err(e) = update_utilization_from_k8s(state.clone()).await {
                  tracing::warn!("Failed to update utilization from k8s: {:?}", e);
             }
-            // ... interval tick ...
+            
+            // Get active simulations and measure their actual resource usage
+            let mut active_sims_updated = false;
+            {
+                let active_guard = match state.active_simulations.try_lock() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        tracing::warn!("Monitoring task couldn't acquire active simulations lock, skipping resource measurement");
+                        tokio::time::sleep(std::time::Duration::from_secs(25)).await;
+                        continue;
+                    }
+                };
+                
+                // Skip if no active simulations
+                if active_guard.is_empty() {
+                    drop(active_guard);
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+                
+                let active_sim_count = active_guard.len();
+                tracing::debug!("Monitoring task measuring resource usage for {} active simulations", active_sim_count);
+                
+                // First just collect the data we need while holding the lock briefly
+                let sim_data: Vec<(Uuid, String, String)> = active_guard.iter()
+                    .map(|(id, sim)| (*id, sim.params.chart.clone(), sim.release_name.clone()))
+                    .collect();
+                drop(active_guard);
+                
+                // Track whether we updated anything
+                let mut updated_any = false;
+                
+                // Measure each simulation's resource usage (outside the lock)
+                for (sim_id, _chart, release_name) in sim_data {
+                    // Use the stored release_name from the report_start request
+                    match fetch_simulation_usage("larstesting", &release_name).await {
+                        Ok(usage) => {
+                            // Now get the lock again to update just this simulation
+                            if let Ok(mut active_guard) = state.active_simulations.try_lock() {
+                                if let Some(sim) = active_guard.get_mut(&sim_id) {
+                                    // Update the simulation with actual usage
+                                    sim.actual_cost.cpu_cores = usage.cpu_cores;
+                                    sim.actual_cost.memory_gb = usage.memory_gb;
+                                    
+                                    // Add a new snapshot of resource usage
+                                    sim.usage_snapshots.push(ResourceSnapshot {
+                                        timestamp: chrono::Utc::now(),
+                                        cpu_cores: usage.cpu_cores,
+                                        memory_gb: usage.memory_gb,
+                                    });
+                                    sim.last_snapshot_time = chrono::Utc::now();
+                                    
+                                    // Calculate monetary cost based on actual usage
+                                    sim.monetary_cost_eur_actual = Some(calculate_monetary_cost(
+                                        &sim.actual_cost,
+                                        sim.params.duration_secs
+                                    ));
+                                    
+                                    updated_any = true;
+                                    tracing::info!(
+                                        %sim_id,
+                                        "Updated actual resource usage. CPU: {:.2} cores, Memory: {:.2} GB", 
+                                        usage.cpu_cores, usage.memory_gb
+                                    );
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!("Failed to measure resource usage for simulation {}: {}", sim_id, e);
+                        }
+                    }
+                }
+                
+                // Set the flag for broadcasting if we updated anything
+                active_sims_updated = updated_any;
+            }
+            
+            // Broadcast an update if we modified any simulations
+            if active_sims_updated {
+                if let Ok(active_guard) = state.active_simulations.try_lock() {
+                    let active_sims = active_guard.values().cloned().collect::<Vec<ActiveSimulation>>();
+                    drop(active_guard);
+                    let _ = state.event_sender.send(AppEvent::ActiveUpdated(active_sims));
+                }
+            }
+            
+            // Wait before checking again (every 30 seconds)
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         }
     });
 
@@ -1456,6 +1793,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/request_run", axum::routing::post(request_run_handler))
         .route("/api/v1/report_start", axum::routing::post(report_start_handler))
         .route("/api/v1/report_complete", axum::routing::post(report_complete_handler))
+        .route("/measure_usage", axum::routing::post(measure_simulation_usage))
         .nest_service("/static", ServeDir::new("static"))
         .route("/history",
             #[cfg(debug_assertions)]
@@ -1463,7 +1801,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(not(debug_assertions))]
             axum::routing::get(history_handler_release)
         )
-        .with_state(state.clone()) 
+        .with_state(state.clone())
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::default().include_headers(true)),

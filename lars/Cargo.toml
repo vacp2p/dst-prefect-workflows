@@ -36,6 +36,8 @@ async-stream = "0.3"
 # Added for mock data generation
 rand = "0.8"
 
+urlencoding = "2.1.2"
+
 [dev-dependencies]
 # Add development-specific dependencies here later if needed
 # e.g., for integration testing
