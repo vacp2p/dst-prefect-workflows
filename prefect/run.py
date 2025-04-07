@@ -16,7 +16,7 @@ load_dotenv()
 
 AUTHORIZED_USERS = ["zorlin", "AlbertoSoutullo", "michatinkers"]
 
-LARS_API_URL = os.getenv("LARS_API_URL", "http://localhost:9930")
+LARS_API_URL = os.getenv("LARS_API_URL", "http://10.1.20.78:9930")
 
 @task
 def find_valid_issue(repo_name: str, github_token: str):
@@ -336,7 +336,7 @@ def deploy_config(config: dict):
     # Generate descriptive release name
     if chart == "waku":
         nodecount = config.get("nodecount", 50)
-        message_rate = 1000 // config.get("publisher_delay", 10)  # messages per second
+        message_rate = config.get("publisher_delay", 10) # messages per second
         message_size = config.get("publisher_message_size", 1)
         k_value = nodecount/1000
         k_str = f"{int(k_value)}K" if k_value >= 1 else f"{int(nodecount)}"
