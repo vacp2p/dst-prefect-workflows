@@ -4,3 +4,4 @@ prefect/10ksim/
 **/target/**
 **/lars_db.sqlite*
 .cursor/
+**/scrape.yaml
