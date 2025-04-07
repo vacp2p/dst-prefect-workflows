@@ -16,7 +16,7 @@ load_dotenv()
 
 AUTHORIZED_USERS = ["zorlin", "AlbertoSoutullo", "michatinkers"]
 
-LARS_API_URL = os.getenv("LARS_API_URL", "http://10.1.20.78:9930")
+LARS_API_URL = os.getenv("LARS_API_URL", "http://lars.per.riff.cc:9930")
 
 @task
 def find_valid_issue(repo_name: str, github_token: str):
