@@ -1901,40 +1901,17 @@ fn is_valid_release_name(name: &str) -> bool {
 
     // Print the chart name/release name for debugging
     tracing::debug!("Checking release name: {}", name);
-    // For waku-specific charts, make sure they follow the expected format
-    if name.contains("waku") {
-        // Match the expected format pattern like "waku-100-node"
-        let is_expected_format = name.starts_with("waku-") && 
-                              name.split('-').count() >= 2 &&
-                              name.split('-').nth(1).map_or(false, |s| s.parse::<u32>().is_ok());
-        
-        if !is_expected_format {
-            return false;
-        }
-    }
     
-    // Must start with a letter or number (common for real releases)
-    if !name.chars().next().unwrap().is_alphanumeric() {
+    // Basic chart name check - must start with either "waku-" or "nimlibp2p-"
+    if !name.starts_with("waku-") && !name.starts_with("nimlibp2p-") {
+        tracing::debug!("Release name doesn't start with a known chart prefix: {}", name);
         return false;
     }
     
-    // Must only contain alphanumeric chars, dashes and dots (valid for Kubernetes names)
-    let valid_chars = name.chars().all(|c| {
-        c.is_alphanumeric() || c == '-' || c == '.'
-    });
-    
-    // Make sure we don't have high-risk characters that could cause Prometheus errors
+    // Simplify validation - just ensure we don't have characters that would break Prometheus queries
     let has_risky_chars = name.contains("\\") || 
-                          name.contains("[") || 
-                          name.contains("]") || 
-                          name.contains("^") || 
-                          name.contains("$") || 
-                          name.contains("+") || 
-                          name.contains("+") || 
-                          name.contains("*") || 
-                          name.contains("?") ||
-                          name.contains("{") ||
-                          name.contains("}");
+                          name.contains("\"") || 
+                          name.contains("'");
     
-    valid_chars && !has_risky_chars
+    !has_risky_chars
 }
