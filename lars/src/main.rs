@@ -166,7 +166,7 @@ pub struct ActiveSimulation {
     pub monetary_cost_eur_predicted: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monetary_cost_eur_actual: Option<f32>,
-    pub release_name: String, // Add release_name to track deployments
+    pub release_name: String, // Release name for tracking deployments
 }
 
 // Add struct for history entries
@@ -645,7 +645,7 @@ async fn report_start_handler(
         monetary_cost_eur_actual: Some(calculate_monetary_cost(&actual_cost, payload.duration_secs)),
         usage_snapshots: Vec::new(), 
         last_snapshot_time: chrono::Utc::now(),
-        release_name: payload.release_name, // Store the release name for resource monitoring
+        release_name: payload.release_name, // Real release name from the client
     };
 
     // Add to active simulations map
@@ -1182,7 +1182,7 @@ async fn process_next_simulation_from_queue(state: &AppState) -> Result<bool, Bo
             &next_sim.predicted_cost,
             next_sim.params.duration_secs
         )),
-        release_name: format!("{}-{}", next_sim.params.chart, next_sim.params.node_count), // Generate a temporary release name
+        release_name: format!("mock-{}-{}", next_sim.params.chart, next_sim.params.node_count), // Mark as mock
     };
     
     // Add to active simulations
@@ -1715,11 +1715,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .collect();
                 drop(active_guard);
                 
-                // Track whether we updated anything
+                // Whether any updates occurred during this monitoring cycle
                 let mut updated_any = false;
                 
                 // Measure each simulation's resource usage (outside the lock)
                 for (sim_id, _chart, release_name) in sim_data {
+                    // Skip mock simulations or those with invalid/placeholder release names
+                    if release_name.starts_with("mock-") || release_name.contains("mock") {
+                        tracing::debug!("Skipping resource measurement for mock simulation {}", sim_id);
+                        continue;
+                    }
+                    
+                    // Skip if release name doesn't look like a valid Kubernetes resource name
+                    if !is_valid_release_name(&release_name) {
+                        tracing::debug!("Skipping resource measurement for simulation {} with invalid release name: {}", sim_id, release_name);
+                        continue;
+                    }
+                    
                     // Use the stored release_name from the report_start request
                     match fetch_simulation_usage("larstesting", &release_name).await {
                         Ok(usage) => {
@@ -1824,4 +1836,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
+}
+
+/// Check if a release name appears to be valid for Kubernetes
+/// 
+/// This doesn't need to be a perfect validation, just enough to filter out
+/// mock or placeholder names that would cause 422 errors in Prometheus
+fn is_valid_release_name(name: &str) -> bool {
+    // Must not be empty
+    if name.is_empty() {
+        return false;
+    }
+    
+    // Must not contain "mock" anywhere
+    if name.to_lowercase().contains("mock") {
+        return false;
+    }
+    
+    // Must be at least a few characters long
+    if name.len() < 3 {
+        return false;
+    }
+    
+    // Must start with a letter or number (common for real releases)
+    if !name.chars().next().unwrap().is_alphanumeric() {
+        return false;
+    }
+    
+    // Must only contain alphanumeric chars, dashes and dots (valid for Kubernetes names)
+    let valid_chars = name.chars().all(|c| {
+        c.is_alphanumeric() || c == '-' || c == '.'
+    });
+    
+    valid_chars
 }
