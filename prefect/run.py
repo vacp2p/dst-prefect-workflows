@@ -753,7 +753,8 @@ def deployment_cron_job(repo_name: str, github_token: str):
         print(f"Collected simulation data: {simulation_results}")
 
         if simulation_results:
-            print("Skipping analysis steps for now.")
+            generate_scrape_yaml(simulation_results)
+            run_analysis(simulation_results)
         else:
             print("No successful simulation data collected, skipping analysis.")
     else:
