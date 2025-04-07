@@ -1,8 +1,22 @@
+## Requirements
+* Kubectl installed
+* kubeconfig pointed at our Kubernetes cluster
+* Public GitHub token (no privileges needed)
 
 ## How to Use
 
+0.  **Clone the Repo:**
+    First, clone the repositry from GitHub using Git.
+
+    ```bash
+    git clone https://github.com/vacp2p/dst-prefect-workflows.git
+    ```
+
 1.  **Install Dependencies:**
     Install the required Python packages, including Prefect. It's recommended to use a virtual environment.
+
+    You'll need python3-pip installed.
+
     ```bash
     pip install -r requirements.txt
     # If you encounter system package issues, you might try:
