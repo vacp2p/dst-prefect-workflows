@@ -14,4 +14,8 @@ LARS is written in **Rust** for its performance, reliability, and memory safety 
 
 ## Interaction
 
-LARS provides an API for simulation orchestrators (like the `dst-prefect-workflows/prefect/run.py` script) to request permission before deploying a simulation. `run.py` queries LARS with the simulation parameters, and LARS responds whether the simulation can proceed immediately or should be deferred. 
+LARS provides an API for simulation orchestrators (like the `dst-prefect-workflows/prefect/run.py` script) to request permission before deploying a simulation. `run.py` queries LARS with the simulation parameters, and LARS responds whether the simulation can proceed immediately or should be deferred.
+
+## Running LARS
+
+LARS will run on port 9930 by default and offers no authentication, as it does not submit jobs directly and only offers read access to Kubernetes.
