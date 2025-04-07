@@ -6,11 +6,14 @@ import requests
 import json
 import os
 from dotenv import load_dotenv
+import time
 
 # Load environment variables from .env file
 load_dotenv()
 
 AUTHORIZED_USERS = ["zorlin", "AlbertoSoutullo", "michatinkers"]
+
+LARS_API_URL = os.getenv("LARS_API_URL", "http://localhost:9930")
 
 @task
 def find_valid_issue(repo_name: str, github_token: str):
@@ -230,16 +233,64 @@ def parse_and_generate_matrix(valid_issue_encoded: str):
 
     return matrix
 
+@task(retries=3, retry_delay_seconds=10)
+def call_lars_api(endpoint: str, payload: dict):
+    url = f"{LARS_API_URL}{endpoint}"
+    headers = {"Content-Type": "application/json"}
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error calling LARS API {endpoint}: {e}")
+        raise
+
 @task
 def deploy_config(config: dict):
-    print(f"Deploying config: chart={config['chart']}, image={config['docker_image']}")
+    print(f"Processing config for chart={config.get('chart', 'unknown')}, nodes={config.get('nodecount', config.get('number_of_peers', 'N/A'))}")
     
+    # --- 1. Request Run from LARS --- 
+    node_count = config.get("nodecount", config.get("number_of_peers", 50))
+    duration_minutes = config.get("duration", 5)
+    duration_secs = duration_minutes * 60
+    chart_type = config.get("chart", "waku")
+    
+    request_payload = {
+        "chart": chart_type,
+        "node_count": node_count,
+        "duration_secs": duration_secs,
+        # LARS will predict cost based on this info
+    }
+    
+    simulation_id = None
+    accepted = False
+    poll_interval = 60
+    
+    while not accepted:
+        print(f"Requesting run approval from LARS for config index {config.get('index', 'N/A')}...")
+        try:
+            response = call_lars_api("/api/v1/request_run", request_payload)
+            if response.get("status") == "ACCEPTED":
+                accepted = True
+                simulation_id = response.get("simulation_id")
+                print(f"LARS ACCEPTED run. Simulation ID: {simulation_id}")
+            else:
+                reason = response.get("reason", "No reason provided")
+                print(f"LARS REJECTED run: {reason}. Retrying in {poll_interval}s...")
+                time.sleep(poll_interval)
+        except Exception as e:
+            print(f"Error requesting run from LARS: {e}. Retrying in {poll_interval}s...")
+            time.sleep(poll_interval)
+            
+    if not simulation_id:
+        print("Error: Run accepted by LARS but no Simulation ID received. Aborting.")
+        return None
+
+    # --- Continue with deployment logic only if accepted --- 
     import subprocess
     import yaml
-    import time
-    import os
     import re
-    from datetime import datetime, timedelta
+    from datetime import datetime
 
     # Helper function to process args properly
     def process_args(args_str):
@@ -280,23 +331,17 @@ def deploy_config(config: dict):
         message_rate = 1000 // config.get("publisher_delay", 10)  # messages per second
         message_size = config.get("publisher_message_size", 1)
         k_value = nodecount/1000
-        if k_value >= 1:
-            k_str = f"{int(k_value)}K"
-        else:
-            k_str = f"{int(nodecount)}"
-        release_name = f"waku-{k_str}-{message_rate}mgs-{config.get('publisher_delay', 10)}s-{message_size}kb"
+        k_str = f"{int(k_value)}K" if k_value >= 1 else f"{int(nodecount)}"
+        release_name = f"waku-{k_str}-{message_rate}mgs-{config.get('publisher_delay', 10)}s-{message_size}kb-{index}"
     else:  # nimlibp2p
         peer_number = config.get("peer_number", 0)
         message_rate = config.get("message_rate", 1000)
         message_size = config.get("message_size", 100)
         k_value = peer_number/1000
-        if k_value >= 1:
-            k_str = f"{int(k_value)}K"
-        else:
-            k_str = f"{int(peer_number)}"
-        release_name = f"nimlibp2p-{k_str}-{message_rate}mgs-{message_size}KB"
+        k_str = f"{int(k_value)}K" if k_value >= 1 else f"{int(peer_number)}"
+        release_name = f"nimlibp2p-{k_str}-{message_rate}mgs-{message_size}KB-{index}"
     
-    print(f"Deploying configuration: {release_name}")
+    print(f"Deploying configuration: {release_name} (LARS Sim ID: {simulation_id})")
     
     # Generate values.yaml based on chart type
     if chart == "waku":
@@ -404,7 +449,7 @@ def deploy_config(config: dict):
         subprocess.run("./get_helm.sh", shell=True)
     
     # Deploy with Helm
-    namespace = "zerotesting" if chart == "waku" else "zerotesting-nimlibp2p"
+    namespace = "larstesting"
     chart_version = "0.4.6" if chart == "waku" else "0.1.0"
     chart_url = f"https://github.com/vacp2p/dst-argo-workflows/raw/refs/heads/main/charts/{chart}-{chart_version}.tgz"
     
@@ -424,74 +469,109 @@ def deploy_config(config: dict):
     ]
     
     print(f"Running Helm command: {' '.join(helm_cmd)}")
+    start_time_deploy = datetime.now()
+    deploy_success = False
     try:
         deploy_result = subprocess.run(helm_cmd, capture_output=True, text=True, check=True)
-        print(f"Deployment successful:")
-        print(f"Helm output: {deploy_result.stdout}")
+        print(f"Helm deployment initiated successfully: {deploy_result.stdout}")
+        deploy_success = True
     except subprocess.CalledProcessError as e:
-        print(f"Error deploying: {e.stderr}")
+        print(f"Error initiating Helm deployment: {e.stderr}")
         print(f"Helm output: {e.stdout}")
-        raise
+        return None
 
-    # Wait for StatefulSet to be ready
-    print(f"Waiting for StatefulSet {release_name}-nodes to be ready...")
-    rollout_cmd = [
-        "kubectl", "rollout", "status",
-        "--watch",
-        "--timeout=30000s",
-        f"statefulset/{release_name}-nodes",
-        "-n", namespace
-    ]
-    try:
-        rollout_result = subprocess.run(rollout_cmd, capture_output=True, text=True, check=True)
-        print(f"StatefulSet {release_name}-nodes is ready")
-    except subprocess.CalledProcessError as e:
-        print(f"Error waiting for StatefulSet: {e.stderr}")
-        raise
+    # --- 2. Report Start to LARS --- 
+    if deploy_success:
+        print(f"Reporting start to LARS for Simulation ID: {simulation_id}")
+        # Payload now only contains ID and descriptive info
+        report_start_payload = {
+            "simulation_id": simulation_id,
+            # LARS already knows the predicted cost from the request_run phase
+            # "actual_cpu": ???,  <-- Removed
+            # "actual_memory": ???, <-- Removed
+            "chart": chart_type,
+            "node_count": node_count,
+            "duration_secs": duration_secs,
+        }
+        try:
+            call_lars_api("/api/v1/report_start", report_start_payload)
+            print("Successfully reported start to LARS.")
+        except Exception as e:
+            print(f"Warning: Failed to report start to LARS: {e}. Continuing simulation run.")
+            # Consider adding logic here if reporting start is absolutely critical
+
+    # Wait for StatefulSet (if deploy was initiated)
+    if deploy_success:
+        print(f"Waiting for StatefulSet {release_name}-nodes to be ready...")
+        rollout_cmd = [
+            "kubectl", "rollout", "status",
+            "--watch",
+            "--timeout=300s",
+            f"statefulset/{release_name}-nodes",
+            "-n", namespace
+        ]
+        try:
+            rollout_result = subprocess.run(rollout_cmd, capture_output=True, text=True, check=True)
+            print(f"StatefulSet {release_name}-nodes is ready.")
+            start_time_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        except subprocess.CalledProcessError as e:
+            print(f"Error waiting for StatefulSet: {e.stderr}. Proceeding with cleanup.")
+            start_time_actual = start_time_deploy.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        print("Skipping rollout wait as deployment failed to initiate.")
+        start_time_actual = start_time_deploy.strftime("%Y-%m-%d %H:%M:%S")
     
-    # Record the start time of the simulation after StatefulSet is ready
-    start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"Starting simulation at: {start_time}")
-    
-    # Wait for specified duration
-    duration_seconds = config.get("duration", 5) * 60
-    print(f"Waiting for {config.get('duration', 5)} minutes ({duration_seconds} seconds)...")
-    
-    # Wait in smaller chunks with progress updates
-    chunk_size = 60  # Report progress every minute
-    chunks = duration_seconds // chunk_size
-    remainder = duration_seconds % chunk_size
-    
-    for i in range(chunks):
-        time.sleep(chunk_size)
-        print(f"Progress: {(i+1)*chunk_size}/{duration_seconds} seconds elapsed")
-    
-    if remainder > 0:
-        time.sleep(remainder)
-        print(f"Progress: {duration_seconds}/{duration_seconds} seconds elapsed")
-    
-    # Record the end time of the simulation
+    # Wait for specified duration (only if deployment was attempted)
     end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"Finished simulation at: {end_time}")
+    if deploy_success:
+        duration_seconds = config.get("duration", 5) * 60
+        print(f"Waiting for simulation duration: {config.get('duration', 5)} minutes ({duration_seconds} seconds)...")
+        
+        chunk_size = 60 
+        chunks = duration_seconds // chunk_size
+        remainder = duration_seconds % chunk_size
+        for i in range(chunks):
+            time.sleep(chunk_size)
+            print(f"Progress: {(i+1)*chunk_size}/{duration_seconds} seconds elapsed")
+        if remainder > 0:
+            time.sleep(remainder)
+            print(f"Progress: {duration_seconds}/{duration_seconds} seconds elapsed")
+        
+        end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"Finished simulation duration at: {end_time}")
+    else:
+        print("Skipping simulation duration wait as deployment failed.")
 
-    # Create simulation data
-    simulation_data = [
-        start_time,
-        end_time,
-        release_name
-    ]
-    
-    # Clean up
-    print("Cleaning up deployment...")
+    # --- 3. Report Completion to LARS --- 
+    print(f"Reporting completion to LARS for Simulation ID: {simulation_id}")
+    report_complete_payload = {
+        "simulation_id": simulation_id,
+        "final_cpu_cores": None,
+        "final_memory_gb": None,
+    }
+    try:
+        call_lars_api("/api/v1/report_complete", report_complete_payload)
+        print("Successfully reported completion to LARS.")
+    except Exception as e:
+        print(f"Warning: Failed to report completion to LARS: {e}. State in LARS might be inconsistent.")
+
+    # Cleanup (always attempt cleanup)
+    print(f"Cleaning up deployment {release_name}...")
     cleanup_cmd = ["helm", "uninstall", release_name, "--namespace", namespace]
     try:
         cleanup_result = subprocess.run(cleanup_cmd, capture_output=True, text=True, check=True)
-        print(f"Successfully cleaned up deployment {release_name}")
+        print(f"Successfully cleaned up deployment {release_name}.")
     except subprocess.CalledProcessError as e:
-        print(f"Warning: Error during cleanup: {e.stderr}")
-        print(f"Helm output: {e.stdout}")
+        print(f"Warning: Error during Helm cleanup: {e.stderr}")
+
+    # Return data needed for analysis (even if deployment failed, might have partial data)
+    simulation_data_result = [
+        start_time_actual, 
+        end_time, 
+        release_name
+    ]
     
-    return simulation_data
+    return simulation_data_result
 
 @task
 def run_analysis(simulation_data: list):
@@ -620,39 +700,52 @@ def deployment_cron_job(repo_name: str, github_token: str):
     if result == "VERIFIED" and valid_issue:
         matrix = parse_and_generate_matrix(valid_issue)
         
-        # Get the parallelism value from the first config (should be the same for all)
-        # Default to 1 if matrix is empty
         parallel_limit = 1
         if matrix:
             parallel_limit = matrix[0].get("parallel_limit", 1)
         
         print(f"Running with parallelism limit of {parallel_limit}")
         
-        # Create a list to store all the futures and their results
         active_futures = []
         simulation_results = []
+        failed_deployments = 0
         
         for config in matrix:
-            # If we've reached the parallelism limit, wait for one task to complete
             while len(active_futures) >= parallel_limit:
-                # Wait for the first future to complete and remove it
-                completed = active_futures.pop(0).result()
-                simulation_results.append(completed)
+                try:
+                    completed_future = active_futures.pop(0)
+                    result = completed_future.result()
+                    if result:
+                        simulation_results.append(result)
+                    else:
+                        failed_deployments += 1
+                except Exception as e:
+                    print(f"Error processing completed future: {e}")
+                    failed_deployments += 1
             
-            # Submit the next task
             active_futures.append(deploy_config.submit(config))
         
-        # Wait for all simulations to complete
+        print(f"Waiting for {len(active_futures)} remaining simulations to complete...")
         for future in active_futures:
-            simulation_results.append(future.result())
+            try:
+                result = future.result()
+                if result:
+                    simulation_results.append(result)
+                else:
+                    failed_deployments += 1
+            except Exception as e:
+                print(f"Error processing remaining future: {e}")
+                failed_deployments += 1
 
-        print(f"Simulation results: {simulation_results}")
-        # Generate scrape.yaml with all simulation data
+        print(f"All simulations processed. Successful: {len(simulation_results)}, Failed: {failed_deployments}")
+        print(f"Collected simulation data: {simulation_results}")
+
         if simulation_results:
-            generate_scrape_yaml(simulation_results)
-            run_analysis(simulation_results)
+            print("Skipping analysis steps for now.")
+        else:
+            print("No successful simulation data collected, skipping analysis.")
     else:
-        print(f"No valid issues found. Result: {result}")
+        print(f"No valid issues found or issue not verified. Result: {result}")
 
 # Local debug run
 if __name__ == "__main__":

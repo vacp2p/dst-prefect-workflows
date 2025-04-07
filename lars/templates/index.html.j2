@@ -7,6 +7,11 @@
     <div class="flex justify-between items-center mb-8">
         <h1 class="text-3xl font-bold">LARS Dashboard</h1>
         <div class="flex items-center space-x-4">
+            <button id="toggle-cost-button" class="p-2 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" title="Toggle Monetary Cost Display">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 10v-1m0 4a8.967 8.967 0 01-2.599-1M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+            </button>
             <label for="time-dilation" class="font-medium text-gray-600 dark:text-gray-300">Time Dilation:</label>
             <select id="time-dilation" class="bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-white rounded-md px-3 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500">
                 <option value="1">1x</option>
@@ -76,6 +81,47 @@
 
 {% block scripts %}
 <script>
+    // Cost display state
+    let showMonetaryCost = localStorage.getItem('showMonetaryCost') === 'true';
+    const costToggleButton = document.getElementById('toggle-cost-button');
+
+    function updateCostToggleState() {
+        if (showMonetaryCost) {
+            document.body.classList.add('show-cost');
+            costToggleButton.classList.add('bg-blue-200', 'dark:bg-blue-800');
+        } else {
+            document.body.classList.remove('show-cost');
+            costToggleButton.classList.remove('bg-blue-200', 'dark:bg-blue-800');
+        }
+    }
+
+    costToggleButton.addEventListener('click', () => {
+        showMonetaryCost = !showMonetaryCost;
+        localStorage.setItem('showMonetaryCost', showMonetaryCost);
+        updateCostToggleState();
+        // Force redraw of items to show/hide cost
+        redrawAllItems(); 
+    });
+
+    // Initial state
+    updateCostToggleState();
+
+    // Function to redraw all displayed items (needed when toggling cost)
+    function redrawAllItems() {
+        // Re-render queue, active, and last finished based on current state
+        // This assumes you have stored the latest data received from SSE
+        // Placeholder: You'll need to store the data arrays (e.g., latestQueueData, latestActiveData)
+        // updateQueueDisplay(latestQueueData);
+        // updateActiveDisplay(latestActiveData);
+        // updateLastFinishedDisplay(latestLastFinishedData); 
+        // For simplicity, we'll just clear and rely on the next SSE update for now
+        if(queueContainer) queueContainer.innerHTML = '';
+        if(activeContainer) activeContainer.innerHTML = '';
+        if(lastFinishedContainer) lastFinishedContainer.innerHTML = ''; 
+        // Request a full state refresh from backend if possible, or wait for next SSE
+        console.log("Cost display toggled, items will update on next SSE event.");
+    }
+
     // Time dilation management
     const timeDilationSelect = document.getElementById('time-dilation');
     let currentTimeDilation = 1; // Default to 1x speed
@@ -249,12 +295,14 @@
 
     // Format a queue item for display
     function formatQueueItem(item) {
-        // Calculate minutes from seconds
         const durationMins = Math.round(item.params.duration_secs / 60);
+        const monetaryCostHtml = showMonetaryCost && item.predicted_cost.monetary_cost_eur
+            ? `<span class="text-yellow-400 ml-2">(€${item.predicted_cost.monetary_cost_eur.toFixed(2)})</span>`
+            : '';
         return `
             <div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4">
                 <h3 class="font-medium text-white">${item.params.chart} (${item.params.node_count} nodes, ${durationMins} min)</h3>
-                <p class="text-gray-300">Predicted Cost: CPU: <span class="font-semibold">${item.predicted_cost.cpu_cores.toFixed(2)}</span> cores | Mem: <span class="font-semibold">${item.predicted_cost.memory_gb.toFixed(2)}</span> GB</p>
+                <p class="text-gray-300">Predicted: <span class="font-semibold">${item.predicted_cost.cpu_cores.toFixed(2)}</span> cores | <span class="font-semibold">${item.predicted_cost.memory_gb.toFixed(2)}</span> GB ${monetaryCostHtml}</p>
                 <p class="text-gray-400 text-xs mt-1">ID: ${item.request_id}</p>
             </div>
         `;
@@ -262,13 +310,19 @@
 
     // Format an active item for display
     function formatActiveItem(item) {
-        // Calculate minutes from seconds
         const durationMins = Math.round(item.params.duration_secs / 60);
+        const predictedCostHtml = showMonetaryCost && item.monetary_cost_eur_predicted
+            ? `<span class="text-yellow-400 ml-2">(€${item.monetary_cost_eur_predicted.toFixed(2)})</span>`
+            : '';
+        const actualCostHtml = showMonetaryCost && item.monetary_cost_eur_actual
+            ? `<span class="text-yellow-400 ml-2">(€${item.monetary_cost_eur_actual.toFixed(2)})</span>`
+            : '';
+
         return `
             <div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4">
                 <h3 class="font-medium text-white">${item.params.chart} (${item.params.node_count} nodes, ${durationMins} min)</h3>
-                <p class="text-gray-300">Actual Cost: CPU: <span class="font-semibold">${item.actual_cost.cpu_cores.toFixed(2)}</span> cores | Mem: <span class="font-semibold">${item.actual_cost.memory_gb.toFixed(2)}</span> GB</p>
-                <p class="text-gray-400 text-xs">Predicted: ${item.predicted_cost.cpu_cores.toFixed(2)} / ${item.predicted_cost.memory_gb.toFixed(2)}</p>
+                <p class="text-gray-300">Actual: <span class="font-semibold">${item.actual_cost.cpu_cores.toFixed(2)}</span> cores | <span class="font-semibold">${item.actual_cost.memory_gb.toFixed(2)}</span> GB ${actualCostHtml}</p>
+                <p class="text-gray-400 text-xs">Predicted: ${item.predicted_cost.cpu_cores.toFixed(2)} / ${item.predicted_cost.memory_gb.toFixed(2)} ${predictedCostHtml}</p>
                 <p class="text-gray-400 text-xs mt-1">ID: ${item.simulation_id}</p>
             </div>
         `;
@@ -276,19 +330,21 @@
 
     // Format the last finished simulation for display
     function formatLastFinishedItem(item) {
-        // Format the timestamp
-        const finishedDate = new Date(item.finished_at);
-        const formattedDate = finishedDate.toLocaleString();
-        
-        // Calculate minutes from seconds
-        const durationMins = Math.round(item.params.duration_secs / 60);
+        const finishedDate = new Date(item.finished_at).toLocaleString();
+        const durationMins = Math.round(item.duration_secs / 60); // Use item.duration_secs directly
+        const predictedCostHtml = showMonetaryCost && item.predicted_cost.monetary_cost_eur
+            ? `<span class="text-yellow-400 ml-2">(€${item.predicted_cost.monetary_cost_eur.toFixed(2)})</span>`
+            : '';
+        const actualCostHtml = showMonetaryCost && item.actual_cost.monetary_cost_eur
+            ? `<span class="text-yellow-400 ml-2">(€${item.actual_cost.monetary_cost_eur.toFixed(2)})</span>`
+            : '';
         
         return `
             <div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4">
                 <h3 class="font-medium text-white">${item.params.chart} (${item.params.node_count} nodes, ${durationMins} min)</h3>
-                <p class="text-gray-300">Final Cost: CPU: <span class="font-semibold">${item.actual_cost.cpu_cores.toFixed(2)}</span> cores | Mem: <span class="font-semibold">${item.actual_cost.memory_gb.toFixed(2)}</span> GB</p>
-                <p class="text-gray-400 text-xs">Predicted: ${item.predicted_cost.cpu_cores.toFixed(2)} / ${item.predicted_cost.memory_gb.toFixed(2)}</p>
-                <p class="text-gray-300 text-sm mt-2">Completed: ${formattedDate}</p>
+                <p class="text-gray-300">Final Cost: <span class="font-semibold">${item.actual_cost.cpu_cores.toFixed(2)}</span> cores | <span class="font-semibold">${item.actual_cost.memory_gb.toFixed(2)}</span> GB ${actualCostHtml}</p>
+                <p class="text-gray-400 text-xs">Predicted: ${item.predicted_cost.cpu_cores.toFixed(2)} / ${item.predicted_cost.memory_gb.toFixed(2)} ${predictedCostHtml}</p>
+                <p class="text-gray-300 text-sm mt-2">Completed: ${finishedDate}</p>
                 <p class="text-gray-400 text-xs mt-1">ID: ${item.simulation_id}</p>
             </div>
         `;
@@ -488,6 +544,8 @@
                 if (data.type === "QueueUpdated") {
                     // Update queue display
                     const queueItems = data.data;
+                    // Store latest data if needed for redrawAllItems
+                    // latestQueueData = queueItems; 
                     queueContainer.innerHTML = queueItems.length === 0 
                         ? '<div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4 text-gray-300">No simulations in queue</div>' 
                         : queueItems.map(formatQueueItem).join('');
@@ -501,6 +559,8 @@
                 } else if (data.type === "ActiveUpdated") {
                     // Update active simulations display
                     const activeItems = data.data;
+                    // Store latest data if needed for redrawAllItems
+                    // latestActiveData = activeItems; 
                     activeContainer.innerHTML = activeItems.length === 0 
                         ? '<div class="bg-gray-800 dark:bg-gray-800 shadow-lg rounded-lg p-4 text-gray-300">No active simulations</div>' 
                         : activeItems.map(formatActiveItem).join('');
@@ -510,6 +570,8 @@
                 } else if (data.type === "LastFinished") {
                     // Update last finished simulation display
                     const lastFinished = data.data;
+                    // Store latest data if needed for redrawAllItems
+                    // latestLastFinishedData = [lastFinished, ...latestLastFinishedData.slice(0, 9)]; 
                     noFinishedElement.style.display = 'none';
                     const lastFinishedHTML = formatLastFinishedItem(lastFinished);
                     
