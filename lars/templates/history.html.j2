@@ -1,27 +1,35 @@
 {% extends "base.html.j2" %}
 
-{% block title %}LARS Run History{% endblock %}
+{% block title %}LARS Simulation History{% endblock %}
 
 {% block content %}
 <div class="container mx-auto p-6">
-    <h1 class="text-3xl font-bold mb-6 text-gray-800 dark:text-gray-100">Simulation Run History</h1>
+    <div class="flex justify-between items-center mb-6">
+        <h1 class="text-3xl font-bold text-gray-800 dark:text-gray-100">Simulation Run History</h1>
+        {# Maybe add a button to manually refresh? #}
+        {# <button id="refresh-history-btn" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-md">Refresh</button> #}
+    </div>
 
     <div class="bg-white dark:bg-gray-800 p-5 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 overflow-x-auto">
         <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
             <thead class="bg-gray-50 dark:bg-gray-700/50">
                 <tr>
-                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Chart</th>
-                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Nodes</th>
-                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Duration (min)</th>
-                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">CPU Cores (Avg)</th>
-                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Memory (GB Avg)</th>
-                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Observed At</th>
+                    <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Issue</th>
+                    <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Chart</th>
+                    <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Nodes</th>
+                    <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Duration</th>
+                    <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Status</th>
+                    <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Finished At</th>
+                    <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Pred Cost (CPU/Mem)</th>
+                    <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Actual Cost (CPU/Mem)</th>
+                    <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Results</th>
+                    <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Actions</th>
                 </tr>
             </thead>
             <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700" id="history-table-body">
                 {# Data will be loaded here via JavaScript #}
                 <tr>
-                    <td colspan="6" class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 italic text-center">Loading history...</td>
+                    <td colspan="10" class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 italic text-center">Loading history...</td>
                 </tr>
             </tbody>
         </table>
@@ -33,21 +41,85 @@
 <script>
     const historyTableBody = document.getElementById('history-table-body');
 
+    // --- Formatting Helpers ---
+    function formatOptional(value, placeholder = 'N/A') {
+        return value !== null && value !== undefined ? value : placeholder;
+    }
+
+    function formatFloat(value, digits = 2, placeholder = 'N/A') {
+        return value !== null && value !== undefined ? value.toFixed(digits) : placeholder;
+    }
+
+    function formatDateTime(dateTimeString, placeholder = 'N/A') {
+        if (!dateTimeString) return placeholder;
+        try {
+            // Append 'Z' if no timezone info is present to treat as UTC
+            const isoString = dateTimeString.endsWith('Z') ? dateTimeString : dateTimeString + 'Z';
+            return new Date(isoString).toLocaleString();
+        } catch (e) {
+            console.error("Error parsing date:", dateTimeString, e);
+            return placeholder;
+        }
+    }
+
+    function formatDuration(seconds) {
+        if (seconds === null || seconds === undefined) return 'N/A';
+        const minutes = Math.floor(seconds / 60);
+        const remainingSeconds = seconds % 60;
+        let durationStr = `${minutes}m`;
+        if (remainingSeconds > 0) {
+            durationStr += ` ${remainingSeconds}s`;
+        }
+        return durationStr;
+    }
+    
+    function formatStatus(status) {
+        let badgeColor = 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'; // Default
+        if (status === 'Completed') {
+            badgeColor = 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300';
+        } else if (status.startsWith('Failed')) {
+             badgeColor = 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300';
+        } else if (status === 'Running' || status === 'Deploying' || status === 'WaitingForRollout' || status === 'CleaningUp') {
+            badgeColor = 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300';
+        }
+        return `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${badgeColor}">${status}</span>`;
+    }
+
+    // --- Row Generation ---
     function formatHistoryRow(entry) {
-        const observedDate = new Date(entry.observed_at).toLocaleString();
-        const durationMins = Math.round(entry.duration_secs / 60);
+        const issueLink = entry.issue_number ? `<a href="https://github.com/vacp2p/vaclab/issues/${entry.issue_number}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline">#${entry.issue_number}</a>` : 'N/A';
+        const resultsLink = entry.results_url ? `<a href="${entry.results_url}" target="_blank" class="text-blue-600 dark:text-blue-400 hover:underline">View</a>` : 'N/A';
+        
+        // Rerun button disabled if status is failed or completed, could re-enable later
+        const rerunDisabled = !(entry.status === 'Completed' || entry.status.startsWith('Failed'));
+        const rerunButtonClass = rerunDisabled 
+            ? "cursor-not-allowed opacity-50 bg-gray-400 dark:bg-gray-600 text-gray-700 dark:text-gray-400"
+            : "bg-indigo-500 hover:bg-indigo-600 dark:bg-indigo-600 dark:hover:bg-indigo-700 text-white";
+
         return `
-            <tr>
-                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">${entry.chart}</td>
-                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${entry.node_count}</td>
-                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${durationMins}</td>
-                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${entry.cpu_cores.toFixed(2)}</td>
-                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${entry.memory_gb.toFixed(2)}</td>
-                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${observedDate}</td>
+            <tr data-simulation-id="${entry.simulation_id}">
+                <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${issueLink}</td>
+                <td class="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">${entry.chart}</td>
+                <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${entry.node_count}</td>
+                <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${formatDuration(entry.duration_secs)}</td>
+                <td class="px-4 py-4 whitespace-nowrap text-sm">${formatStatus(entry.status)}</td>
+                <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${formatDateTime(entry.end_time)}</td>
+                <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${formatFloat(entry.predicted_cpu_cores)} / ${formatFloat(entry.predicted_memory_gb)}</td>
+                <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${formatFloat(entry.actual_cpu_cores)} / ${formatFloat(entry.actual_memory_gb)}</td>
+                <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${resultsLink}</td>
+                <td class="px-4 py-4 whitespace-nowrap text-sm font-medium">
+                    <button 
+                        class="rerun-btn px-3 py-1 text-xs rounded-md ${rerunButtonClass}" 
+                        data-simulation-id="${entry.simulation_id}" 
+                        ${rerunDisabled ? 'disabled' : ''}>
+                        Rerun
+                    </button>
+                </td>
             </tr>
         `;
     }
 
+    // --- Data Loading ---
     async function loadHistory() {
         if (!historyTableBody) return;
         try {
@@ -68,7 +140,54 @@
         }
     }
 
-    // Load history when the page loads
+    // --- Rerun Logic ---
+    async function handleRerunClick(event) {
+        const button = event.target;
+        const simulationId = button.dataset.simulationId;
+        if (!simulationId) return;
+
+        button.disabled = true;
+        button.textContent = 'Queuing...';
+        button.classList.add('opacity-50', 'cursor-not-allowed');
+
+        try {
+            const response = await fetch(`/api/rerun/${simulationId}`, { method: 'POST' });
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Rerun request failed: ${response.status} - ${errorText}`);
+            }
+            const result = await response.json();
+            console.log('Rerun queued:', result);
+            // Optionally provide more feedback, e.g., flash message or redirect
+            alert(`Simulation ${simulationId} queued for rerun.`); 
+             // You might want to redirect to the main page or refresh history after a delay
+             // window.location.href = '/'; 
+             button.textContent = 'Queued'; // Keep disabled but show queued
+        } catch (error) {
+            console.error("Failed to queue rerun:", error);
+            alert(`Failed to queue rerun for ${simulationId}. See console for details.`);
+            // Re-enable the button on failure
+            button.disabled = false;
+            button.textContent = 'Rerun';
+            button.classList.remove('opacity-50', 'cursor-not-allowed');
+        }
+    }
+
+    function addRerunListeners() {
+        const rerunButtons = historyTableBody.querySelectorAll('.rerun-btn');
+        rerunButtons.forEach(button => {
+            button.addEventListener('click', handleRerunClick);
+        });
+    }
+
+    // --- Initial Load ---
     document.addEventListener('DOMContentLoaded', loadHistory);
+
+    // Optional: Add listener for manual refresh button if you add one
+    // const refreshBtn = document.getElementById('refresh-history-btn');
+    // if (refreshBtn) {
+    //     refreshBtn.addEventListener('click', loadHistory);
+    // }
+
 </script>
 {% endblock %}

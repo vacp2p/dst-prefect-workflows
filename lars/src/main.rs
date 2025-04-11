@@ -2,7 +2,7 @@ use axum::{
     routing::{get, post},
     Router,
     response::{Html, IntoResponse, sse::{Event, Sse, KeepAlive}},
-    extract::{State, Json},
+    extract::{State, Json, Path},
 };
 use minijinja::{path_loader, Environment, context};
 use minijinja_autoreload::AutoReloader;
@@ -12,6 +12,7 @@ use tower_http::{
     services::ServeDir,
     trace::{DefaultMakeSpan, TraceLayer},
 };
+#[cfg(feature = "debug")]
 use tower_livereload::LiveReloadLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use serde::{Serialize, Deserialize};
@@ -28,6 +29,7 @@ use reqwest;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use urlencoding;
+use base64::Engine;
 
 // --- Data Structures ---
 
@@ -144,29 +146,74 @@ pub struct QueuedSimulation {
     pub request_id: Uuid,
     pub params: SimulationParams,
     pub predicted_cost: ResourceCost,
+    pub issue_number: Option<u64>, // Added to track origin
+    // Add other parameters needed directly from the issue
+    pub docker_image: String,
+    pub pubsub_topic: String, // Waku specific
+    pub bootstrap_nodes: Option<u32>, // Waku specific (ADDED)
+    pub publisher_enabled: bool, // Waku specific
+    pub publisher_message_size: u32, // Waku specific
+    pub publisher_delay: u32, // Waku specific
+    pub publisher_message_count: u32, // Waku specific
+    pub artificial_latency: bool, // Waku specific
+    pub latency_ms: u32, // Waku specific
+    pub nodes_command: Option<String>, // Waku specific
+    pub bootstrap_command: Option<String>, // Waku specific
+    // Nim-libp2p specific
+    pub peer_number: Option<u32>,
+    pub number_of_peers: Option<u32>,
+    pub peers_to_connect: Option<u32>,
+    pub message_rate: Option<u32>,
+    pub message_size: Option<u32>,
+    // Common
+    pub parallel_limit: u32,
 }
 
 // Define a new struct for resource usage snapshots
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, serde::Deserialize)] // Added Deserialize
 pub struct ResourceSnapshot {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub cpu_cores: f32,
     pub memory_gb: f32,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, serde::Deserialize)] // Added Deserialize
 pub struct ActiveSimulation {
-    pub simulation_id: Uuid,
-    pub params: SimulationParams,
+    pub simulation_id: Uuid,       // ID of this specific run
+    pub request_id: Uuid,          // ID from the original QueuedSimulation
+    pub params: SimulationParams,  // Basic params (chart, nodes, duration)
     pub predicted_cost: ResourceCost,
-    pub actual_cost: ResourceCost,
+    pub actual_cost: ResourceCost, // Will be updated by monitoring
     pub usage_snapshots: Vec<ResourceSnapshot>,
     pub last_snapshot_time: chrono::DateTime<chrono::Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monetary_cost_eur_predicted: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monetary_cost_eur_actual: Option<f32>,
-    pub release_name: String, // Release name for tracking deployments
+    pub release_name: String,    // Generated Helm release name
+    pub issue_number: Option<u64>, // Original GitHub Issue number
+    pub status: String,            // e.g., "Deploying", "Running", "CleaningUp", "Failed", "Completed"
+    pub start_time: Option<chrono::DateTime<chrono::Utc>>, // Time deployment started
+    pub end_time: Option<chrono::DateTime<chrono::Utc>>,     // Time simulation finished
+
+    // Add detailed parameters needed for deployment
+    pub docker_image: String,
+    pub pubsub_topic: String, // Waku specific
+    pub bootstrap_nodes: u32, // Waku specific (already in SimulationParams? No, add here)
+    pub publisher_enabled: bool, // Waku specific
+    pub publisher_message_size: u32, // Waku specific
+    pub publisher_delay: u32, // Waku specific
+    pub publisher_message_count: u32, // Waku specific
+    pub artificial_latency: bool, // Waku specific
+    pub latency_ms: u32, // Waku specific
+    pub nodes_command: Option<String>, // Waku specific
+    pub bootstrap_command: Option<String>, // Waku specific
+    // Nim-libp2p specific
+    pub peer_number: Option<u32>,
+    pub number_of_peers: Option<u32>,
+    pub peers_to_connect: Option<u32>,
+    pub message_rate: Option<u32>,
+    pub message_size: Option<u32>,
 }
 
 // Add struct for history entries
@@ -318,8 +365,12 @@ struct AppState {
     event_sender: broadcast::Sender<AppEvent>,
     scheduler_state: Arc<Mutex<SchedulerState>>,
     time_dilation: Arc<Mutex<u32>>,
-    // Store predicted cost for runs awaiting start report
-    pending_simulations: Arc<Mutex<HashMap<Uuid, ResourceCost>>>, 
+    pending_simulations: Arc<Mutex<HashMap<Uuid, ResourceCost>>>,
+    // Add GitHub config
+    github_token: String,
+    github_repo: String,
+    github_authorized_users: Vec<String>, // Add authorized users
+    http_client: reqwest::Client, // Add shared reqwest client
 }
 
 // --- Handlers (defined OUTSIDE main) ---
@@ -638,6 +689,7 @@ async fn report_start_handler(
 
     let active_sim = ActiveSimulation {
         simulation_id: sim_id,
+        request_id: Uuid::new_v4(), // Placeholder: Generate new UUID. TODO: Link original request_id
         params,
         predicted_cost: predicted_cost.clone(), 
         actual_cost: actual_cost.clone(),     
@@ -646,6 +698,26 @@ async fn report_start_handler(
         usage_snapshots: Vec::new(), 
         last_snapshot_time: chrono::Utc::now(),
         release_name: payload.release_name, // Real release name from the client
+        issue_number: None, // Added to track origin
+        status: "PendingDeployment".to_string(),
+        start_time: None,
+        end_time: None,
+        docker_image: String::new(), // Waku specific
+        pubsub_topic: String::new(), // Waku specific
+        bootstrap_nodes: 0, // Waku specific (already in SimulationParams? No, add here)
+        publisher_enabled: false, // Waku specific
+        publisher_message_size: 0, // Waku specific
+        publisher_delay: 0, // Waku specific
+        publisher_message_count: 0, // Waku specific
+        artificial_latency: false, // Waku specific
+        latency_ms: 0, // Waku specific
+        nodes_command: None, // Waku specific
+        bootstrap_command: None, // Waku specific
+        peer_number: None, // Nim-libp2p specific
+        number_of_peers: None, // Nim-libp2p specific
+        peers_to_connect: None, // Nim-libp2p specific
+        message_rate: None, // Nim-libp2p specific
+        message_size: None, // Nim-libp2p specific
     };
 
     // Add to active simulations map
@@ -767,46 +839,60 @@ async fn report_complete_handler(
     }
 }
 
-// Ensure these handlers are defined before main
+// --- API Data Structures ---
+
+// Structure for returning history via API
+#[derive(Serialize, FromRow, Debug, Clone)]
+pub struct SimulationRunHistoryEntry {
+    simulation_id: String, // UUID as String
+    request_id: String,    // UUID as String
+    issue_number: Option<i64>, // Using i64 for potential large numbers, maps to INTEGER
+    status: String,
+    chart: String,
+    node_count: i64, // Use i64 to match INTEGER
+    duration_secs: i64, // Use i64 to match INTEGER
+    start_time: Option<DateTime<Utc>>,
+    end_time: DateTime<Utc>,
+    release_name: String,
+    predicted_cpu_cores: f64, // Use f64 to match REAL
+    predicted_memory_gb: f64, // Use f64 to match REAL
+    actual_cpu_cores: Option<f64>, // Use f64 to match REAL
+    actual_memory_gb: Option<f64>, // Use f64 to match REAL
+    results_url: Option<String>,
+    config_details: String, // Keep as JSON string for API response
+}
+
+// --- API Handlers ---
+
+// Fetches simulation history from the new table
+#[debug_handler]
 async fn api_history_handler(State(state): State<AppState>) -> impl IntoResponse {
-    // Actual implementation...
     let db_pool = &state.db_pool;
-    let result = sqlx::query(
+    tracing::info!("Fetching simulation history from simulation_runs table...");
+
+    // Query the new simulation_runs table
+    let history_result: Result<Vec<SimulationRunHistoryEntry>, sqlx::Error> = sqlx::query_as(
         r#"
         SELECT 
-            chart, 
-            node_count, 
-            duration_secs,
-            cpu_cores, 
-            memory_gb, 
-            observed_at
-        FROM cost_history
-        ORDER BY observed_at DESC
-        LIMIT 100
+            simulation_id, request_id, issue_number, status, chart, node_count, duration_secs,
+            start_time, end_time, release_name, predicted_cpu_cores, predicted_memory_gb, 
+            actual_cpu_cores, actual_memory_gb, results_url, config_details
+        FROM simulation_runs 
+        ORDER BY end_time DESC 
+        LIMIT 100 -- Limit results for performance
         "#
     )
     .fetch_all(db_pool)
-    .await
-    .map(|rows| {
-        rows.iter().map(|row| {
-            HistoryEntry {
-                chart: row.get("chart"),
-                node_count: row.get("node_count"),
-                duration_secs: row.get("duration_secs"),
-                cpu_cores: row.get("cpu_cores"),
-                memory_gb: row.get("memory_gb"),
-                observed_at: chrono::DateTime::parse_from_rfc3339(&row.get::<String, _>("observed_at"))
-                    .unwrap_or_default()
-                    .with_timezone(&chrono::Utc),
-            }
-        }).collect::<Vec<HistoryEntry>>()
-    });
+    .await;
 
-    match result {
-        Ok(entries) => Json(entries).into_response(),
-        Err(err) => {
-            tracing::error!("Failed to fetch history data: {}", err);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(Vec::<HistoryEntry>::new())).into_response()
+    match history_result {
+        Ok(history) => {
+            tracing::info!("Successfully fetched {} history records.", history.len());
+            Json(history).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch simulation history: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)).into_response()
         }
     }
 }
@@ -994,6 +1080,24 @@ async fn mock_submit_handler(State(state): State<AppState>, Json(payload): Json<
             request_id: Uuid::new_v4(),
             params: params.clone(), // Use the generated params
             predicted_cost, // Use the determined predicted cost
+            issue_number: None, // Added to track origin
+            docker_image: String::new(), // Waku specific
+            pubsub_topic: String::new(), // Waku specific
+            bootstrap_nodes: None, // Waku specific (ADDED)
+            publisher_enabled: false, // Waku specific
+            publisher_message_size: 0, // Waku specific
+            publisher_delay: 0, // Waku specific
+            publisher_message_count: 0, // Waku specific
+            artificial_latency: false, // Waku specific
+            latency_ms: 0, // Waku specific
+            nodes_command: None, // Waku specific
+            bootstrap_command: None, // Waku specific
+            peer_number: None, // Nim-libp2p specific
+            number_of_peers: None, // Nim-libp2p specific
+            peers_to_connect: None, // Nim-libp2p specific
+            message_rate: None, // Nim-libp2p specific
+            message_size: None, // Nim-libp2p specific
+            parallel_limit: 1, // Common
         };
 
         tracing::debug!(request_id = %queued_sim.request_id, "Created queued simulation");
@@ -1061,857 +1165,1106 @@ async fn set_time_dilation_handler(State(state): State<AppState>, Json(payload):
 /// Process the next simulation from the queue, moving it to active status
 /// Returns Ok(true) if a simulation was processed, Ok(false) if no simulations were in the queue
 async fn process_next_simulation_from_queue(state: &AppState) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    // Check current utilization first
-    let utilization_guard = match state.cluster_utilization.try_lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            tracing::warn!("Scheduler couldn't acquire utilization lock, will retry later");
-            return Ok(false);
-        }
-    };
+    let mut queued_simulations = state.queued_simulations.lock().await;
     
-    let current_cpu_percent = utilization_guard.cpu_percent;
-    let current_memory_percent = utilization_guard.memory_percent;
-    
-    // Define thresholds
-    const MAX_CPU_PERCENT: f32 = 30.0; // Maximum cluster CPU utilization allowed
-    const MAX_MEMORY_PERCENT: f32 = 80.0; // Maximum cluster memory utilization allowed
-    
-    // Drop utilization lock before further processing
-    drop(utilization_guard);
-    
-    // Try to get a lock on the queue
-    let mut queue_guard = match state.queued_simulations.try_lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            tracing::warn!("Scheduler couldn't acquire queue lock, will retry later");
-            return Ok(false);
-        }
-    };
-    
-    // Check if queue is empty
-    if queue_guard.is_empty() {
-        return Ok(false);
-    }
-    
-    // Peek at the next simulation (don't remove yet)
-    let next_sim = match queue_guard.front() {
-        Some(sim) => sim,
-        None => return Ok(false), // Queue was empty (shouldn't happen due to check above)
-    };
-    
-    // Calculate the additional CPU and memory usage this simulation would add
-    let cpu_cores_predicted = next_sim.predicted_cost.cpu_cores;
-    let memory_gb_predicted = next_sim.predicted_cost.memory_gb;
-    
-    // Get current cluster capacity
-    let cpu_capacity = 1812.0; // From logs (replace with actual capacity from state if available)
-    let memory_capacity = 2976.7385; // From logs (replace with actual capacity from state if available)
-    
-    // Calculate the additional percentage this would add
-    let additional_cpu_percent = (cpu_cores_predicted / cpu_capacity) * 100.0;
-    let additional_memory_percent = (memory_gb_predicted / memory_capacity) * 100.0;
-    
-    // Calculate new projected utilization
-    let projected_cpu_percent = current_cpu_percent + additional_cpu_percent;
-    let projected_memory_percent = current_memory_percent + additional_memory_percent;
-    
-    // Check if adding this simulation would exceed thresholds
-    if projected_cpu_percent > MAX_CPU_PERCENT {
+    if let Some(queued_sim) = queued_simulations.front() {
         tracing::info!(
-            simulation_id = %next_sim.request_id,
-            current_cpu = %current_cpu_percent,
-            additional_cpu = %additional_cpu_percent,
-            projected_cpu = %projected_cpu_percent,
-            threshold = %MAX_CPU_PERCENT,
-            "Simulation would exceed CPU threshold, keeping in queue"
+            issue = queued_sim.issue_number.map(|i| i.to_string()).unwrap_or_else(|| "N/A".to_string()),
+            chart = %queued_sim.params.chart,
+            nodes = queued_sim.params.node_count,
+            "Checking admission for next queued simulation"
         );
-        return Ok(false);
-    }
-    
-    if projected_memory_percent > MAX_MEMORY_PERCENT {
-        tracing::info!(
-            simulation_id = %next_sim.request_id,
-            current_memory = %current_memory_percent,
-            additional_memory = %additional_memory_percent,
-            projected_memory = %projected_memory_percent,
-            threshold = %MAX_MEMORY_PERCENT,
-            "Simulation would exceed memory threshold, keeping in queue"
-        );
-        return Ok(false);
-    }
-    
-    // Now that we've checked thresholds, we can pop the simulation from the queue
-    let next_sim = queue_guard.pop_front().unwrap(); // Safe because we checked it exists
-    
-    tracing::info!(
-        simulation_id = %next_sim.request_id,
-        current_cpu = %current_cpu_percent,
-        additional_cpu = %additional_cpu_percent,
-        projected_cpu = %projected_cpu_percent,
-        current_memory = %current_memory_percent,
-        additional_memory = %additional_memory_percent,
-        projected_memory = %projected_memory_percent,
-        "Moving simulation from queue to active status"
-    );
-    
-    // Now get lock on active simulations
-    let mut active_guard = match state.active_simulations.try_lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            // Put the simulation back in the queue
-            queue_guard.push_front(next_sim);
-            tracing::warn!("Scheduler couldn't acquire active simulations lock, returning simulation to queue");
-            return Ok(false);
-        }
-    };
-    
-    // Convert QueuedSimulation to ActiveSimulation
-    let active_sim = ActiveSimulation {
-        simulation_id: next_sim.request_id,
-        params: next_sim.params.clone(),
-        predicted_cost: next_sim.predicted_cost.clone(),
-        actual_cost: next_sim.predicted_cost.clone(), // Initialize with predicted
-        usage_snapshots: Vec::new(),
-        last_snapshot_time: chrono::Utc::now(),
-        monetary_cost_eur_predicted: Some(calculate_monetary_cost(
-            &next_sim.predicted_cost,
-            next_sim.params.duration_secs
-        )),
-        monetary_cost_eur_actual: Some(calculate_monetary_cost(
-            &next_sim.predicted_cost,
-            next_sim.params.duration_secs
-        )),
-        release_name: format!("mock-{}-{}", next_sim.params.chart, next_sim.params.node_count), // Mark as mock
-    };
-    
-    // Add to active simulations
-    active_guard.insert(next_sim.request_id, active_sim);
-    
-    // Broadcast updates
-    let queue_updated: Vec<QueuedSimulation> = queue_guard.iter().cloned().collect();
-    let active_updated: Vec<ActiveSimulation> = active_guard.values().cloned().collect();
-    
-    // Release locks before broadcast to avoid deadlock
-    drop(queue_guard);
-    drop(active_guard);
-    
-    // Send the updates
-    if let Err(e) = state.event_sender.send(AppEvent::QueueUpdated(queue_updated)) {
-        tracing::error!("Failed to broadcast queue update: {}", e);
-    }
-    
-    if let Err(e) = state.event_sender.send(AppEvent::ActiveUpdated(active_updated)) {
-        tracing::error!("Failed to broadcast active update: {}", e);
-    }
-    
-    // Successfully processed a simulation
-    Ok(true)
-}
 
-async fn update_utilization_from_k8s(state: AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let namespace = "larstesting";
-    
-    match fetch_prometheus_metrics(namespace).await {
-        Ok(metrics) => {
-            // Get active simulations costs
-            let active_sims = state.active_simulations.lock().await;
-            let sim_cpu: f32 = active_sims.values().map(|sim| sim.actual_cost.cpu_cores).sum();
-            let sim_memory: f32 = active_sims.values().map(|sim| sim.actual_cost.memory_gb).sum();
-            let active_sims_len = active_sims.len(); // Get length before dropping
-            drop(active_sims);
+        // --- Check Admission Control (using predicted_cost from the queued sim) ---
+        let can_admit = {
+            let cluster_util = state.cluster_utilization.lock().await;
+            let predicted_cpu = queued_sim.predicted_cost.cpu_cores;
+            let predicted_memory = queued_sim.predicted_cost.memory_gb;
             
-            // Update cluster utilization using Prometheus base + simulation costs
-            let mut cluster_util = state.cluster_utilization.lock().await;
-            cluster_util.total_cpu_cores = metrics.cluster_total_cpu;
-            cluster_util.total_memory_gb = metrics.cluster_total_memory_gb;
-            cluster_util.used_cpu_cores = metrics.cluster_used_cpu + sim_cpu;
-            cluster_util.used_memory_gb = metrics.cluster_used_memory_gb + sim_memory;
-            cluster_util.cpu_percent = (cluster_util.used_cpu_cores / cluster_util.total_cpu_cores).max(0.0).min(100.0) * 100.0; // Clamp percentage
-            cluster_util.memory_percent = (cluster_util.used_memory_gb / cluster_util.total_memory_gb).max(0.0).min(100.0) * 100.0; // Clamp percentage
-            let cluster_util_clone = cluster_util.clone(); // Clone for broadcast
-            drop(cluster_util);
+            // TODO: Consider active simulations already running but maybe not fully measured yet?
+            // For now, use the current measured utilization + prediction.
+            let new_total_cpu = cluster_util.used_cpu_cores + predicted_cpu;
+            let new_total_memory = cluster_util.used_memory_gb + predicted_memory;
             
-            // Update namespace utilization similarly (if needed for UI, otherwise remove)
-            // ... (optional: update namespace_util based on metrics.namespace_... + sim_...)
+            // Use configured limits (e.g., from env vars or defaults)
+            // Hardcoding for now, should make configurable
+            let cpu_limit_percent = 80.0;
+            let memory_limit_percent = 85.0;
 
-            // Broadcast updates
-            let current_active = state.active_simulations.lock().await.values().cloned().collect(); // Re-lock is fine here
-            let _ = state.event_sender.send(AppEvent::ActiveUpdated(current_active));
-            let cpu_p = cluster_util_clone.cpu_percent; // Get value before potential move
-            let mem_p = cluster_util_clone.memory_percent; // Get value before potential move
-            let _ = state.event_sender.send(AppEvent::ClusterUtilizationUpdated(cluster_util_clone));
+            let new_cpu_percent = (new_total_cpu / cluster_util.total_cpu_cores) * 100.0;
+            let new_memory_percent = (new_total_memory / cluster_util.total_memory_gb) * 100.0;
             
-            tracing::debug!(
-                "Resource update (Prometheus + Sims) - Cluster CPU: {:.1}%, Mem: {:.1}%, Total Active Sims: {}", 
-                cpu_p, mem_p, active_sims_len // Use stored values
-            );
-            Ok(())
-        },
-        Err(e) => { // Correctly format the Err arm
-            tracing::warn!("Prometheus fetch failed: {}. Falling back to simulation-only metrics.", e);
+            let cpu_ok = new_cpu_percent <= cpu_limit_percent;
+            let memory_ok = new_memory_percent <= memory_limit_percent;
             
-            // Fallback logic: Calculate utilization based ONLY on active simulations
-            let active_sims = state.active_simulations.lock().await;
-            let active_sims_len = active_sims.len();
-            if active_sims_len > 0 {
-                let sim_cpu: f32 = active_sims.values().map(|sim| sim.actual_cost.cpu_cores).sum();
-                let sim_memory: f32 = active_sims.values().map(|sim| sim.actual_cost.memory_gb).sum();
-                drop(active_sims);
-
-                let mut cluster_util = state.cluster_utilization.lock().await;
-                // Use previous total capacity if known, otherwise keep defaults
-                // Update *used* based only on sims
-                cluster_util.used_cpu_cores = sim_cpu;
-                cluster_util.used_memory_gb = sim_memory;
-                cluster_util.cpu_percent = (cluster_util.used_cpu_cores / cluster_util.total_cpu_cores).max(0.0).min(100.0) * 100.0; 
-                cluster_util.memory_percent = (cluster_util.used_memory_gb / cluster_util.total_memory_gb).max(0.0).min(100.0) * 100.0;
-                let cluster_util_clone = cluster_util.clone();
-                drop(cluster_util);
-
-                // Broadcast updates (simulation only)
-                let current_active = state.active_simulations.lock().await.values().cloned().collect();
-                let _ = state.event_sender.send(AppEvent::ActiveUpdated(current_active));
-                // Get values before move
-                let cpu_p_fallback = cluster_util_clone.cpu_percent;
-                let mem_p_fallback = cluster_util_clone.memory_percent;
-                let _ = state.event_sender.send(AppEvent::ClusterUtilizationUpdated(cluster_util_clone)); 
-                
-                tracing::debug!(
-                    "Resource update (Sims Only Fallback) - CPU: {:.1}%, Mem: {:.1}%, Total Active Sims: {}", 
-                    cpu_p_fallback, mem_p_fallback, active_sims_len // Use stored values
-                );
+            if cpu_ok && memory_ok {
+                true
             } else {
-                drop(active_sims);
-                // No active sims and Prometheus failed - maybe reset utilization?
-                tracing::debug!("Prometheus failed and no active simulations. Utilization not updated.");
-                // Optionally reset cluster_util here if desired
+                let mut reasons = Vec::new();
+                if !cpu_ok { reasons.push(format!("CPU limit ({:.1}%) would be exceeded ({:.1}%)", cpu_limit_percent, new_cpu_percent)); }
+                if !memory_ok { reasons.push(format!("Memory limit ({:.1}%) would be exceeded ({:.1}%)", memory_limit_percent, new_memory_percent)); }
+                tracing::warn!(
+                    issue = queued_sim.issue_number.map(|i| i.to_string()).unwrap_or_else(|| "N/A".to_string()),
+                    reason = reasons.join(", "), 
+                    "Admission rejected for queued simulation"
+                );
+                false
             }
-            // Return Ok even in fallback, as the function itself didn't fail, just the source
-            Ok(())
-        }
-    }
-}
+        };
 
-// Fetch metrics from Prometheus
-async fn fetch_prometheus_metrics(namespace: &str) -> Result<KubernetesMetrics, Box<dyn std::error::Error + Send + Sync>> {
-    let prometheus_url = "https://metrics.riff.cc/select/0/prometheus/api/v1/";
-    let http_client = reqwest::Client::new();
-    
-    // Initialize metrics with default values
-    let mut metrics = KubernetesMetrics::default();
-    metrics.namespace = namespace.to_string();
-    
-    // Fetch total cluster CPU capacity
-    let cluster_cpu_query = format!("{}query?query={}", prometheus_url, 
-        "sum(kube_node_status_capacity{resource=\"cpu\"})");
-    
-    let response = http_client.get(&cluster_cpu_query).send().await?;
-    if !response.status().is_success() {
-        return Err(format!("Prometheus request failed for cluster CPU: {}", response.status()).into());
-    }
-    let prom_response: PrometheusResponse = response.json().await?;
-    
-    if prom_response.status == "success" && !prom_response.data.result.is_empty() {
-        if let Ok(value) = prom_response.data.result[0].value.1.parse::<f32>() {
-            metrics.cluster_total_cpu = value;
-            tracing::debug!("Prometheus: Cluster CPU capacity: {}", value);
-        }
-    }
-    
-    // Fetch total cluster memory capacity (in GB)
-    let cluster_mem_query = format!("{}query?query={}", prometheus_url, 
-        "sum(kube_node_status_capacity{resource=\"memory\"}) / 1024 / 1024 / 1024");
-    
-    let response = http_client.get(&cluster_mem_query).send().await?;
-    if !response.status().is_success() {
-        return Err(format!("Prometheus request failed for cluster Memory: {}", response.status()).into());
-    }
-    let prom_response: PrometheusResponse = response.json().await?;
-    
-    if prom_response.status == "success" && !prom_response.data.result.is_empty() {
-        if let Ok(value) = prom_response.data.result[0].value.1.parse::<f32>() {
-            metrics.cluster_total_memory_gb = value;
-            tracing::debug!("Prometheus: Cluster memory capacity: {} GB", value);
-        }
-    }
-    
-    // Fetch cluster CPU usage
-    let cluster_cpu_usage_query = format!("{}query?query={}", prometheus_url, 
-        "sum(rate(container_cpu_usage_seconds_total[5m]))");
-    
-    let response = http_client.get(&cluster_cpu_usage_query).send().await?;
-     if !response.status().is_success() {
-        return Err(format!("Prometheus request failed for cluster CPU usage: {}", response.status()).into());
-    }
-    let prom_response: PrometheusResponse = response.json().await?;
-    
-    if prom_response.status == "success" && !prom_response.data.result.is_empty() {
-        if let Ok(value) = prom_response.data.result[0].value.1.parse::<f32>() {
-            metrics.cluster_used_cpu = value;
-            tracing::debug!("Prometheus: Cluster CPU usage: {}", value);
-        }
-    }
-    
-    // Fetch cluster memory usage (in GB)
-    let cluster_mem_usage_query = format!("{}query?query={}", prometheus_url, 
-        "sum(container_memory_working_set_bytes) / 1024 / 1024 / 1024");
-    
-    let response = http_client.get(&cluster_mem_usage_query).send().await?;
-    if !response.status().is_success() {
-        return Err(format!("Prometheus request failed for cluster Memory usage: {}", response.status()).into());
-    }
-    let prom_response: PrometheusResponse = response.json().await?;
-    
-    if prom_response.status == "success" && !prom_response.data.result.is_empty() {
-        if let Ok(value) = prom_response.data.result[0].value.1.parse::<f32>() {
-            metrics.cluster_used_memory_gb = value;
-            tracing::debug!("Prometheus: Cluster memory usage: {} GB", value);
-        }
-    }
-    
-    // Fetch namespace CPU usage
-    let namespace_cpu_query = format!("{}query?query={}", prometheus_url, 
-        format!("sum(rate(container_cpu_usage_seconds_total{{namespace=\"{}\"}}[5m]))", namespace));
-    
-    let response = http_client.get(&namespace_cpu_query).send().await?;
-    if !response.status().is_success() {
-        return Err(format!("Prometheus request failed for namespace CPU usage: {}", response.status()).into());
-    }
-    let prom_response: PrometheusResponse = response.json().await?;
-    
-    if prom_response.status == "success" && !prom_response.data.result.is_empty() {
-        if let Ok(value) = prom_response.data.result[0].value.1.parse::<f32>() {
-            metrics.namespace_used_cpu = value;
-            tracing::debug!("Prometheus: Namespace {} CPU usage: {}", namespace, value);
-        }
-    }
-    
-    // Fetch namespace memory usage (in GB)
-    let namespace_mem_query = format!("{}query?query={}", prometheus_url, 
-        format!("sum(container_memory_working_set_bytes{{namespace=\"{}\"}}) / 1024 / 1024 / 1024", namespace));
-    
-    let response = http_client.get(&namespace_mem_query).send().await?;
-    if !response.status().is_success() {
-        return Err(format!("Prometheus request failed for namespace Memory usage: {}", response.status()).into());
-    }
-    let prom_response: PrometheusResponse = response.json().await?;
-    
-    if prom_response.status == "success" && !prom_response.data.result.is_empty() {
-        if let Ok(value) = prom_response.data.result[0].value.1.parse::<f32>() {
-            metrics.namespace_used_memory_gb = value;
-            tracing::debug!("Prometheus: Namespace {} memory usage: {} GB", namespace, value);
-        }
-    }
-    
-    Ok(metrics)
-}
+        if can_admit {
+            // Remove from queue and prepare to run
+            let sim_to_run = queued_simulations.pop_front().unwrap(); // Safe due to check above
+            drop(queued_simulations); // Release lock on queue
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MeasureUsagePayload {
-    simulation_id: Uuid,
-    release_name: String,
-    namespace: String,
-}
+            let simulation_id = Uuid::new_v4();
+            let chart = &sim_to_run.params.chart;
+            let node_count = sim_to_run.params.node_count;
+            let index_placeholder = sim_to_run.request_id.to_string().chars().take(6).collect::<String>(); // Use part of request ID for uniqueness
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MeasureUsageResponse {
-    simulation_id: Uuid,
-    cpu_cores: f32,
-    memory_gb: f32,
-    success: bool,
-    message: Option<String>,
-}
-
-#[debug_handler]
-async fn measure_simulation_usage(
-    State(state): State<AppState>,
-    Json(payload): Json<MeasureUsagePayload>,
-) -> impl IntoResponse {
-    tracing::info!("Measuring actual usage for simulation {}: in namespace {}, release {}",
-                  payload.simulation_id, payload.namespace, payload.release_name);
-    
-    // Check if this simulation is active
-    let sim_id = payload.simulation_id;
-    let mut active_guard = match state.active_simulations.try_lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(MeasureUsageResponse {
-                simulation_id: sim_id,
-                cpu_cores: 0.0,
-                memory_gb: 0.0,
-                success: false,
-                message: Some("Could not acquire lock on active simulations".to_string()),
-            })).into_response();
-        }
-    };
-    
-    let active_sim = match active_guard.get_mut(&sim_id) {
-        Some(sim) => sim,
-        None => {
-            drop(active_guard);
-            return (StatusCode::NOT_FOUND, Json(MeasureUsageResponse {
-                simulation_id: sim_id,
-                cpu_cores: 0.0,
-                memory_gb: 0.0,
-                success: false,
-                message: Some("Simulation not found in active simulations".to_string()),
-            })).into_response();
-        }
-    };
-    
-    // Use Prometheus to get actual resource usage
-    let usage_result = match fetch_simulation_usage(&payload.namespace, &payload.release_name).await {
-        Ok(usage) => {
-            // Update the simulation with actual usage
-            active_sim.actual_cost.cpu_cores = usage.cpu_cores;
-            active_sim.actual_cost.memory_gb = usage.memory_gb;
+            // Generate Helm Release Name (similar to Python script)
+            let k_value = node_count as f32 / 1000.0;
+            let k_str = if k_value >= 1.0 {
+                format!("{}k", k_value as u32)
+            } else {
+                node_count.to_string()
+            };
             
-            // Add a new snapshot of resource usage
-            active_sim.usage_snapshots.push(ResourceSnapshot {
-                timestamp: chrono::Utc::now(),
-                cpu_cores: usage.cpu_cores,
-                memory_gb: usage.memory_gb,
-            });
-            active_sim.last_snapshot_time = chrono::Utc::now();
+            let release_name = if chart == "waku" {
+                 format!(
+                    "waku-{}-{}mgs-{}s-{}kb-{}", 
+                    k_str, 
+                    sim_to_run.publisher_message_size, // Note: Python used delay here? Let's use size.
+                    sim_to_run.publisher_delay, 
+                    sim_to_run.publisher_message_size, // Size again? Let's use message size
+                    index_placeholder 
+                 )
+            } else { // nimlibp2p
+                 format!(
+                    "nimlibp2p-{}-{}mgs-{}kb-{}", 
+                    k_str, // Based on number_of_peers
+                    sim_to_run.message_rate.unwrap_or(0),
+                    sim_to_run.message_size.unwrap_or(0),
+                    index_placeholder
+                 )
+            };
+
+            // Create ActiveSimulation entry
+            let active_sim = ActiveSimulation {
+                simulation_id, 
+                request_id: sim_to_run.request_id,
+                params: sim_to_run.params.clone(),
+                predicted_cost: sim_to_run.predicted_cost.clone(),
+                actual_cost: ResourceCost::default(), // Initialize actual cost
+                usage_snapshots: Vec::new(),
+                last_snapshot_time: chrono::Utc::now(),
+                monetary_cost_eur_predicted: Some(calculate_monetary_cost(&sim_to_run.predicted_cost, sim_to_run.params.duration_secs)),
+                monetary_cost_eur_actual: None, // Set later
+                release_name: release_name.clone(), 
+                issue_number: sim_to_run.issue_number,
+                status: "PendingDeployment".to_string(),
+                start_time: None,
+                end_time: None,
+                docker_image: sim_to_run.docker_image,
+                pubsub_topic: sim_to_run.pubsub_topic,
+                bootstrap_nodes: sim_to_run.bootstrap_nodes.unwrap_or(3), // Default if None (shouldn't happen for waku)
+                publisher_enabled: sim_to_run.publisher_enabled,
+                publisher_message_size: sim_to_run.publisher_message_size,
+                publisher_delay: sim_to_run.publisher_delay,
+                publisher_message_count: sim_to_run.publisher_message_count,
+                artificial_latency: sim_to_run.artificial_latency,
+                latency_ms: sim_to_run.latency_ms,
+                nodes_command: sim_to_run.nodes_command,
+                bootstrap_command: sim_to_run.bootstrap_command,
+                peer_number: sim_to_run.peer_number,
+                number_of_peers: sim_to_run.number_of_peers,
+                peers_to_connect: sim_to_run.peers_to_connect,
+                message_rate: sim_to_run.message_rate,
+                message_size: sim_to_run.message_size,
+            };
+
+            // Add to active simulations map
+            state.active_simulations.lock().await.insert(simulation_id, active_sim.clone());
+
+            // Broadcast updated active list
+            let current_active = state.active_simulations.lock().await.values().cloned().collect();
+            let _ = state.event_sender.send(AppEvent::ActiveUpdated(current_active));
             
-            // Calculate monetary cost based on actual usage
-            active_sim.monetary_cost_eur_actual = Some(calculate_monetary_cost(
-                &active_sim.actual_cost,
-                active_sim.params.duration_secs
-            ));
-            
-            MeasureUsageResponse {
-                simulation_id: sim_id,
-                cpu_cores: usage.cpu_cores,
-                memory_gb: usage.memory_gb,
-                success: true,
-                message: None,
-            }
-        },
+            // Broadcast updated queue list
+            let current_queue = state.queued_simulations.lock().await.iter().cloned().collect();
+            let _ = state.event_sender.send(AppEvent::QueueUpdated(current_queue));
+
+            tracing::info!(%simulation_id, %release_name, issue = sim_to_run.issue_number.map(|i| i.to_string()).unwrap_or_else(|| "N/A".to_string()), "Admitted and spawning simulation task.");
+
+            // Spawn the actual simulation task
+            let task_state = state.clone();
+            tokio::spawn(run_simulation_task(task_state, active_sim));
+
+            return Ok(true); // Indicate a simulation was started
+
+        } else {
+            // Cannot admit, leave it in the queue for next time
+            return Ok(false); // Indicate no simulation started (due to admission control)
+        }
+
+    } else {
+        // Queue is empty
+        tracing::debug!("Simulation queue is empty.");
+        return Ok(false); // Indicate no simulation started (queue empty)
+    }
+}
+
+// --- Simulation Execution Task ---
+
+// This task runs a single simulation (Helm, wait, cleanup)
+async fn run_simulation_task(state: AppState, mut sim: ActiveSimulation) {
+    let sim_id = sim.simulation_id;
+    let release_name = sim.release_name.clone();
+    let namespace = "larstesting"; // Make configurable?
+    let chart_type = sim.params.chart.clone();
+    let duration_seconds = sim.params.duration_secs;
+    let issue_str = sim.issue_number.map(|i| format!("#{}", i)).unwrap_or_else(|| "N/A".to_string());
+
+    // Update status
+    update_simulation_status(&state, sim_id, "Deploying").await;
+    sim.start_time = Some(chrono::Utc::now()); // Record deployment start
+
+    // --- 1. Generate values.yaml --- 
+    let values_yaml = match generate_values_yaml(&sim) {
+        Ok(yaml) => yaml,
         Err(e) => {
-            tracing::warn!("Failed to measure actual usage for simulation {}: {}", sim_id, e);
-            MeasureUsageResponse {
-                simulation_id: sim_id,
-                cpu_cores: active_sim.actual_cost.cpu_cores, // Return current values
-                memory_gb: active_sim.actual_cost.memory_gb,
-                success: false,
-                message: Some(format!("Failed to measure usage: {}", e)),
-            }
+            tracing::error!(%sim_id, issue = %issue_str, "Failed to generate values.yaml: {}", e);
+            update_simulation_status(&state, sim_id, "Failed (Config)").await;
+            cleanup_failed_simulation(&state, sim.clone(), &release_name, namespace).await;
+            return;
         }
     };
     
-    // Get a copy of active simulations for broadcasting
-    let active_sims = active_guard.values().cloned().collect::<Vec<ActiveSimulation>>();
-    drop(active_guard);
+    // --- 2. Create Temp File for values.yaml ---
+    let values_file_path_result = write_temp_values_file(&values_yaml).await; // Added .await
+    if let Err(e) = values_file_path_result {
+        tracing::error!(%sim_id, issue = %issue_str, "Failed to write temp values file: {}", e);
+        update_simulation_status(&state, sim_id, "Failed (IO)").await;
+        cleanup_failed_simulation(&state, sim.clone(), &release_name, namespace).await; // Pass sim object
+        return;
+    }
+    let values_file_path = values_file_path_result.unwrap(); // Safe due to check above
+
+    // --- 3. Run Helm Upgrade/Install --- 
+    let helm_result = run_helm_deploy(&sim, &release_name, namespace, &values_file_path).await; // Added .await
     
-    // Broadcast active simulation update
-    let _ = state.event_sender.send(AppEvent::ActiveUpdated(active_sims));
-    
-    Json(usage_result).into_response()
+    // Clean up temp file regardless of helm outcome
+    if let Err(e) = tokio::fs::remove_file(&values_file_path).await {
+        tracing::warn!(%sim_id, path = %values_file_path.display(), "Failed to remove temp values file: {}", e);
+    }
+
+    if let Err(e) = helm_result {
+        tracing::error!(%sim_id, issue = %issue_str, release = %release_name, "Helm deployment failed: {}", e);
+        update_simulation_status(&state, sim_id, "Failed (Helm)").await;
+        // Attempt cleanup even if deploy failed
+        cleanup_failed_simulation(&state, sim.clone(), &release_name, namespace).await; // Pass sim object
+        return;
+    }
+    tracing::info!(%sim_id, issue = %issue_str, release = %release_name, "Helm deployment initiated successfully.");
+
+    // --- 4. Wait for StatefulSet Rollout --- 
+    update_simulation_status(&state, sim_id, "WaitingForRollout").await;
+    // Construct the StatefulSet name (assuming chart follows pattern)
+    let statefulset_name = format!("{}-nodes", release_name); // Adapt if nim-libp2p uses different naming
+    let rollout_result = run_kubectl_rollout(&statefulset_name, namespace).await;
+
+    if let Err(e) = rollout_result {
+        tracing::error!(%sim_id, issue = %issue_str, release = %release_name, sts = %statefulset_name, "Rollout status check failed: {}", e);
+        update_simulation_status(&state, sim_id, "Failed (Rollout)").await;
+        // Attempt cleanup
+        cleanup_simulation(&state, sim.clone(), &release_name, namespace, "Failed (Rollout)").await; // Pass sim object
+        return;
+    }
+    tracing::info!(%sim_id, issue = %issue_str, release = %release_name, sts = %statefulset_name, "StatefulSet rollout successful.");
+    sim.start_time = Some(chrono::Utc::now()); // Record actual simulation start time after rollout
+
+    // --- 5. Wait for Simulation Duration --- 
+    update_simulation_status(&state, sim_id, "Running").await;
+    tracing::info!(%sim_id, issue = %issue_str, release = %release_name, duration = duration_seconds, "Waiting for simulation duration...");
+    tokio::time::sleep(Duration::from_secs(duration_seconds as u64)).await;
+    sim.end_time = Some(chrono::Utc::now());
+    tracing::info!(%sim_id, issue = %issue_str, release = %release_name, "Simulation duration finished.");
+
+    // --- 6. Cleanup Simulation --- 
+    // Pass the simulation object itself so cleanup can potentially use its final state
+    let final_sim_state = cleanup_simulation(&state, sim, &release_name, namespace, "Completed").await;
+
+    // --- 7. Trigger Analysis and Posting --- 
+    if let Some(completed_sim) = final_sim_state {
+        tracing::info!(sim_id=%completed_sim.simulation_id, issue = %issue_str, "Simulation task finished. Triggering analysis and result posting.");
+        // Spawn analysis as a separate task to avoid blocking the scheduler if analysis is slow
+        let analysis_state = state.clone();
+        tokio::spawn(run_analysis_and_post_results(analysis_state, completed_sim));
+    } else {
+        tracing::warn!(sim_id=%sim_id, issue = %issue_str, "Simulation cleanup didn't return final state. Skipping analysis.");
+    }
 }
 
-// Helper struct for simulation usage
-struct SimulationUsage {
-    cpu_cores: f32,
-    memory_gb: f32,
+// --- Analysis and GitHub Posting ---
+
+#[derive(Serialize)]
+struct ScrapeGeneralConfig {
+    times_names: Vec<Vec<String>>,
 }
 
-// Fetch the resource usage for a specific simulation release from Prometheus
-async fn fetch_simulation_usage(namespace: &str, release_name: &str) -> Result<SimulationUsage, Box<dyn std::error::Error + Send + Sync>> {
-    let prometheus_url = "https://metrics.riff.cc/select/0/prometheus/api/v1/";
-    let http_client = reqwest::Client::new();
-    
-    // Log the original release name for debugging
-    tracing::debug!("Fetching resource usage for: namespace={}, release_name={}", namespace, release_name);
-    
-    // More robust release name escaping for Prometheus regex
-    // Escape special regex characters: ., +, *, ?, ^, $, (, ), [, ], {, }, |, \
-    let release_pattern = release_name
-        .replace(".", "\\\\.")
-        .replace("+", "\\\\+")
-        .replace("*", "\\\\*")
-        .replace("?", "\\\\?")
-        .replace("^", "\\\\^")
-        .replace("$", "\\\\$")
-        .replace("(", "\\\\(")
-        .replace(")", "\\\\)")
-        .replace("[", "\\\\[")
-        .replace("]", "\\\\]")
-        .replace("{", "\\\\{")
-        .replace("}", "\\\\}")
-        .replace("|", "\\\\|")
-        .replace("\\", "\\\\\\\\");
-    
-    // Use a more precise regex pattern to match only the pods for this release
-    // This pattern matches pods that start with the release name followed by a dash
-    // and then anything, e.g., "release-name-*"
-    let pod_pattern = format!("^{}(-|$)", release_pattern);
-    
-    // CPU query: Get the sum of CPU usage for all pods with this release name in the namespace
-    let cpu_query = format!(
-        "sum(rate(container_cpu_usage_seconds_total{{namespace=\"{}\", pod=~\"{}.*\"}}[1m]))",
-        namespace, pod_pattern
-    );
-    
-    // Log the constructed Prometheus query for debugging
-    tracing::debug!("Prometheus CPU query: {}", cpu_query);
-    
-    let cpu_query_url = format!("{}query?query={}", prometheus_url, urlencoding::encode(&cpu_query));
-    
-    let response = http_client.get(&cpu_query_url).send().await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response.text().await.unwrap_or_else(|_| "Could not extract error text".to_string());
-        return Err(format!("Prometheus request failed for CPU: {} - {}", status, error_text).into());
-    }
-    
-    let prom_response: PrometheusResponse = response.json().await?;
-    let cpu_cores = if prom_response.status == "success" && !prom_response.data.result.is_empty() {
-        prom_response.data.result[0].value.1.parse::<f32>().unwrap_or(0.0)
-    } else {
-        tracing::warn!("No CPU data found for namespace={}, release_name={}", namespace, release_name);
-        0.0
-    };
-    
-    // Memory query: Get the sum of memory usage for all pods with this release name in the namespace
-    let memory_query = format!(
-        "sum(container_memory_working_set_bytes{{namespace=\"{}\", pod=~\"{}.*\"}}) / (1024*1024*1024)",
-        namespace, pod_pattern
-    );
-    
-    // Log the constructed Prometheus query for debugging
-    tracing::debug!("Prometheus Memory query: {}", memory_query);
-    
-    let memory_query_url = format!("{}query?query={}", prometheus_url, urlencoding::encode(&memory_query));
-    
-    let response = http_client.get(&memory_query_url).send().await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response.text().await.unwrap_or_else(|_| "Could not extract error text".to_string());
-        return Err(format!("Prometheus request failed for Memory: {} - {}", status, error_text).into());
-    }
-    
-    let prom_response: PrometheusResponse = response.json().await?;
-    let memory_gb = if prom_response.status == "success" && !prom_response.data.result.is_empty() {
-        prom_response.data.result[0].value.1.parse::<f32>().unwrap_or(0.0)
-    } else {
-        tracing::warn!("No Memory data found for namespace={}, release_name={}", namespace, release_name);
-        0.0
-    };
-    
-    tracing::info!(
-        "Measured actual usage for {}/{}: CPU cores: {:.2}, Memory GB: {:.2}",
-        namespace, release_name, cpu_cores, memory_gb
-    );
-    
-    Ok(SimulationUsage {
-        cpu_cores,
-        memory_gb,
-    })
+#[derive(Serialize)]
+struct ScrapeConfigSection {
+    #[serde(rename = "$__rate_interval")]
+    rate_interval: String,
+    step: String,
+    dump_location: String,
 }
+
+#[derive(Serialize, Clone)]
+struct ScrapeMetric {
+    query: String,
+    extract_field: String,
+    folder_name: String,
+}
+
+#[derive(Serialize, Clone)]
+struct ScrapePlottingConfig {
+    ignore_columns: Vec<String>,
+    data_points: u32,
+    folder: Vec<String>,
+    data: Vec<String>,
+    include_files: Vec<String>,
+    xlabel_name: String,
+    ylabel_name: String,
+    show_min_max: bool,
+    outliers: bool,
+    #[serde(rename = "scale-x")]
+    scale_x: u32,
+    fig_size: [u32; 2],
+}
+
+#[derive(Serialize)]
+struct ScrapeYamlRoot {
+    general_config: ScrapeGeneralConfig,
+    scrape_config: ScrapeConfigSection,
+    metrics_to_scrape: std::collections::HashMap<String, ScrapeMetric>,
+    plotting: std::collections::HashMap<String, ScrapePlottingConfig>,
+}
+
+// Generates the scrape.yaml content for a completed simulation
+fn generate_scrape_yaml_rust(sim: &ActiveSimulation) -> Result<String, serde_yaml::Error> {
+    let start_time_str = sim.start_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
+    let end_time_str = sim.end_time.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
+    let release_name = sim.release_name.clone();
+
+    // The python script expects a list of lists for times_names
+    let times_names_data = vec![vec![start_time_str, end_time_str, release_name.clone()]];
+    
+    // Define a unique dump location for this simulation's metrics
+    let dump_location = format!("lars_metrics/{}/", sim.simulation_id); // Removed comma
+    let plot_name = format!("plot-{}", sim.simulation_id);
+
+    let scrape_config = ScrapeYamlRoot {
+        general_config: ScrapeGeneralConfig {
+            times_names: times_names_data,
+        },
+        scrape_config: ScrapeConfigSection {
+            rate_interval: "121s".to_string(),
+            step: "60s".to_string(),
+            dump_location: dump_location.clone(), // Use the unique dump location
+        },
+        metrics_to_scrape: [
+            ("libp2p_network_in".to_string(), ScrapeMetric {
+                query: "rate(libp2p_network_bytes_total{direction='in'}[$__rate_interval])".to_string(),
+                extract_field: "instance".to_string(),
+                folder_name: "libp2p-in/".to_string(),
+            }),
+            ("libp2p_network_out".to_string(), ScrapeMetric {
+                query: "rate(libp2p_network_bytes_total{direction='out'}[$__rate_interval])".to_string(),
+                extract_field: "instance".to_string(),
+                folder_name: "libp2p-out/".to_string(),
+            })
+        ].iter().cloned().collect(),
+        plotting: [
+            (plot_name, ScrapePlottingConfig {
+                ignore_columns: vec!["bootstrap".to_string(), "midstrap".to_string()],
+                data_points: 25,
+                folder: vec![dump_location], // Plot data from this sim's dump location
+                data: vec!["libp2p-in".to_string(), "libp2p-out".to_string()],
+                include_files: vec![release_name], // Only include this simulation's release name
+                xlabel_name: "Simulation".to_string(),
+                ylabel_name: "KBytes/s".to_string(),
+                show_min_max: false,
+                outliers: true,
+                scale_x: 1000,
+                fig_size: [20, 20],
+            })
+        ].iter().cloned().collect(),
+    };
+
+    // Serialize to YAML string
+    // Note: serde_yaml doesn't perfectly replicate the python script's times_names format easily.
+    // We might need to adjust the python script slightly to parse this format,
+    // or do more complex serialization here.
+    // For now, this standard YAML should be parseable.
+    serde_yaml::to_string(&scrape_config)
+}
+
+// Main function to orchestrate analysis and posting results
+async fn run_analysis_and_post_results(state: AppState, sim: ActiveSimulation) {
+    let sim_id = sim.simulation_id;
+    let issue_number = match sim.issue_number {
+        Some(num) => num,
+        None => {
+            tracing::warn!(%sim_id, "Cannot post results as simulation is not linked to a GitHub issue.");
+            return;
+        }
+    };
+    let issue_str = format!("#{}", issue_number);
+    tracing::info!(%sim_id, issue = %issue_str, "Starting analysis process...");
+
+    // --- 1. Generate scrape.yaml ---
+    let scrape_yaml_content = match generate_scrape_yaml_rust(&sim) {
+        Ok(content) => content,
+        Err(e) => {
+            tracing::error!(%sim_id, issue = %issue_str, "Failed to generate scrape.yaml content: {}", e);
+            // TODO: Maybe post a failure comment to GitHub?
+            return;
+        }
+    };
+
+    // --- 2. Write scrape.yaml to temp file ---
+    let scrape_yaml_path = match write_temp_scrape_file(&scrape_yaml_content, sim_id).await {
+        Ok(path) => path,
+        Err(e) => {
+             tracing::error!(%sim_id, issue = %issue_str, "Failed to write temporary scrape.yaml: {}", e);
+             // TODO: Maybe post a failure comment to GitHub?
+             return;
+        }
+    };
+
+    // --- 3. Run Python Analysis Script --- 
+    // Define path for the output PNG
+    let analysis_dir = format!("./analysis_results/{}", sim_id);
+    if let Err(e) = tokio::fs::create_dir_all(&analysis_dir).await {
+         tracing::error!(%sim_id, issue = %issue_str, path=%analysis_dir, "Failed to create analysis output directory: {}", e);
+         cleanup_temp_file(&scrape_yaml_path).await;
+         return;
+    }
+    let output_png_path = format!("{}/analysis_plot.png", analysis_dir);
+
+    let analysis_result = run_python_analysis_script(&scrape_yaml_path, &output_png_path).await;
+    
+    // Clean up scrape.yaml file now that analysis is done (or failed)
+    cleanup_temp_file(&scrape_yaml_path).await;
+
+    let png_file_path = match analysis_result {
+        Ok(path) => path,
+        Err(e) => {
+            tracing::error!(%sim_id, issue = %issue_str, "Python analysis script failed: {}", e);
+            // TODO: Post failure comment to GitHub?
+            return;
+        }
+    };
+    tracing::info!(%sim_id, issue = %issue_str, png_path=%png_file_path, "Python analysis script completed successfully.");
+
+    // --- 4. Commit PNG to GitHub Repo --- 
+    let commit_result = commit_analysis_to_github(&state, issue_number, &png_file_path).await;
+    
+    // --- Store results_url in DB --- 
+    let results_url_for_db: Option<String> = match &commit_result {
+        Ok(url) => Some(url.clone()),
+        Err(_) => None,
+    };
+    if let Some(url) = &results_url_for_db {
+         let update_url_result = sqlx::query("UPDATE simulation_runs SET results_url = ? WHERE simulation_id = ?")
+            .bind(url)
+            .bind(sim.simulation_id.to_string())
+            .execute(&state.db_pool)
+            .await;
+        if let Err(e) = update_url_result {
+             tracing::error!(sim_id=%sim.simulation_id, "Failed to update results_url in simulation_runs: {}", e);
+        }
+    }
+
+    let github_file_url = match commit_result {
+        Ok(url) => url,
+        Err(e) => {
+             tracing::error!(%sim_id, issue = %issue_str, "Failed to commit analysis PNG to GitHub: {}", e);
+             // TODO: Post failure comment (without image)?
+             // Try to update labels anyway
+             update_github_labels_post_analysis(&state, issue_number, sim_id, false).await;
+             return;
+        }
+    };
+    tracing::info!(%sim_id, issue = %issue_str, url=%github_file_url, "Successfully committed analysis PNG to GitHub.");
+
+    // --- 5. Post Comment to GitHub Issue --- 
+    let comment_body = format!("# Results\n\n![Analysis Plot]({})", github_file_url);
+    if let Err(e) = post_comment_to_github(&state, issue_number, &comment_body).await {
+         tracing::error!(%sim_id, issue = %issue_str, "Failed to post results comment to GitHub: {}", e);
+         // Continue to labeling even if comment fails
+    }
+    tracing::info!(%sim_id, issue = %issue_str, "Successfully posted results comment to GitHub.");
+
+    // --- 6. Update GitHub Labels --- 
+    update_github_labels_post_analysis(&state, issue_number, sim_id, true).await;
+
+    tracing::info!(%sim_id, issue = %issue_str, "Analysis and result posting complete.");
+}
+
+// Helper to write scrape.yaml to a temporary file
+async fn write_temp_scrape_file(content: &str, sim_id: Uuid) -> Result<std::path::PathBuf, std::io::Error> {
+    use tokio::io::AsyncWriteExt;
+    let temp_dir = std::env::temp_dir().join("lars_scrape");
+    tokio::fs::create_dir_all(&temp_dir).await?;
+    let file_path = temp_dir.join(format!("scrape-{}.yaml", sim_id));
+    let mut file = tokio::fs::File::create(&file_path).await?;
+    file.write_all(content.as_bytes()).await?;
+    Ok(file_path)
+}
+
+// Helper to clean up a temporary file
+async fn cleanup_temp_file(path: &std::path::Path) {
+    if let Err(e) = tokio::fs::remove_file(path).await {
+        tracing::warn!(path = %path.display(), "Failed to remove temporary file: {}", e);
+    }
+}
+
+// Placeholder function to run the python analysis script
+async fn run_python_analysis_script(scrape_yaml_path: &std::path::Path, output_png_path: &str) -> Result<String, String> {
+    let script_path = "./10ksim/analyse.py"; // Relative to LARS execution dir
+    let python_executable = "python3"; // Assume python3 is in PATH
+
+    // --- Ensure 10ksim repo exists ---
+    if !tokio::fs::try_exists("./10ksim").await.unwrap_or(false) {
+        tracing::info!("Cloning 10ksim repository...");
+        let mut clone_cmd = tokio::process::Command::new("git");
+        clone_cmd.arg("clone").arg("https://github.com/vacp2p/10ksim.git").arg("./10ksim");
+        let clone_output = clone_cmd.output().await.map_err(|e| format!("Failed to execute git clone: {}", e))?;
+        if !clone_output.status.success() {
+            return Err(format!("git clone failed: {}\n{}", 
+                String::from_utf8_lossy(&clone_output.stderr),
+                String::from_utf8_lossy(&clone_output.stdout)
+            ));
+        }
+    }
+    
+    // --- Create a symlink or copy scrape.yaml to the expected location ---
+    // Since the Python script expects scrape.yaml in the current directory,
+    // we need to make sure our generated file is available at that location
+    tracing::info!("Copying scrape YAML to current directory");
+    tokio::fs::copy(scrape_yaml_path, "scrape.yaml").await
+        .map_err(|e| format!("Failed to copy scrape.yaml to current directory: {}", e))?;
+    
+    // --- Execute Script (without arguments, like the Python implementation) --- 
+    tracing::info!("Running Python analysis script: {}", script_path);
+    let mut cmd = tokio::process::Command::new(python_executable);
+    cmd.arg(script_path);
+    // No additional arguments - matching the Python run.py implementation
+
+    let output = cmd.output().await.map_err(|e| format!("Failed to execute python script: {}", e))?;
+
+    if !output.status.success() {
+        Err(format!("Python script failed.\nExit Code: {}\nStderr: {}\nStdout: {}", 
+            output.status, 
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        ))
+    } else {
+        // Check if the output file was actually created
+        if tokio::fs::try_exists(output_png_path).await.unwrap_or(false) {
+             Ok(output_png_path.to_string())
+        } else {
+             Err(format!("Python script succeeded but output PNG file '{}' was not found. Script stdout:\n{}", 
+                output_png_path,
+                String::from_utf8_lossy(&output.stdout)
+            ))
+        }
+    }
+}
+
+// Placeholder function to commit the analysis PNG to GitHub
+async fn commit_analysis_to_github(state: &AppState, issue_number: u64, local_png_path: &str) -> Result<String, String> {
+    // Strategy: Commit to a known path in the repo, e.g., simulation_results/{issue_number}/analysis_plot.png
+    let repo_path = format!("simulation_results/{}/analysis_plot.png", issue_number);
+    tracing::info!(path=%repo_path, "Attempting to commit analysis PNG to GitHub repo");
+
+    // 1. Read file content
+    let content_bytes = tokio::fs::read(local_png_path).await
+        .map_err(|e| format!("Failed to read local PNG file '{}': {}", local_png_path, e))?;
+    
+    // 2. Base64 encode content
+    let content_base64 = base64::engine::general_purpose::STANDARD.encode(&content_bytes); // Use Engine trait
+
+    // 3. Check if file already exists (to get SHA for update)
+    let get_url = format!("https://api.github.com/repos/{}/contents/{}", state.github_repo, repo_path);
+    let headers = build_github_headers(&state.github_token)?;
+    
+    let get_response = state.http_client.get(&get_url).headers(headers.clone()).send().await
+         .map_err(|e| format!("GitHub API request failed (GET {}): {}", repo_path, e))?;
+
+    let existing_sha = if get_response.status() == reqwest::StatusCode::OK {
+        #[derive(Deserialize)]
+        struct GetContentResponse { sha: String }
+        let json_body: GetContentResponse = get_response.json().await
+             .map_err(|e| format!("Failed to parse GitHub GET response for {}: {}", repo_path, e))?;
+        Some(json_body.sha)
+    } else if get_response.status() == reqwest::StatusCode::NOT_FOUND {
+        None
+    } else {
+        return Err(format!("GitHub API error checking file existence (GET {}): Status {}, Body: {}", 
+            repo_path, get_response.status(), get_response.text().await.unwrap_or_default()));
+    };
+
+    // 4. Create or Update file content via API
+    let put_url = get_url; // Same URL for PUT
+    let commit_message = format!("Add analysis results for simulation from issue #{}", issue_number);
+
+    #[derive(Serialize)]
+    struct PutContentPayload {
+        message: String,
+        content: String, // base64 encoded
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sha: Option<String>, // Required if updating
+    }
+
+    let payload = PutContentPayload {
+        message: commit_message,
+        content: content_base64,
+        sha: existing_sha,
+    };
+
+    let put_response = state.http_client.put(&put_url)
+        .headers(headers.clone()) // Reuse headers
+        .json(&payload)
+        .send().await
+        .map_err(|e| format!("GitHub API request failed (PUT {}): {}", repo_path, e))?;
+
+    if put_response.status() == reqwest::StatusCode::OK || put_response.status() == reqwest::StatusCode::CREATED {
+        #[derive(Deserialize)]
+        struct PutContentResponse { content: ContentDetails }
+        #[derive(Deserialize)]
+        struct ContentDetails { html_url: String }
+        
+        let json_body: PutContentResponse = put_response.json().await
+             .map_err(|e| format!("Failed to parse GitHub PUT response for {}: {}", repo_path, e))?;
+        Ok(json_body.content.html_url)
+    } else {
+        Err(format!("GitHub API error committing file (PUT {}): Status {}, Body: {}", 
+            repo_path, put_response.status(), put_response.text().await.unwrap_or_default()))
+    }
+}
+
+// Placeholder function to post a comment to a GitHub issue
+async fn post_comment_to_github(state: &AppState, issue_number: u64, body: &str) -> Result<(), String> {
+    let url = format!("https://api.github.com/repos/{}/issues/{}/comments", state.github_repo, issue_number);
+    let headers = build_github_headers(&state.github_token)?;
+
+    #[derive(Serialize)]
+    struct CommentPayload { body: String }
+    let payload = CommentPayload { body: body.to_string() };
+
+    let response = state.http_client.post(&url)
+        .headers(headers)
+        .json(&payload)
+        .send().await
+        .map_err(|e| format!("GitHub API request failed (POST comment issue {}): {}", issue_number, e))?;
+
+    if response.status() == reqwest::StatusCode::CREATED {
+        Ok(())
+    } else {
+        Err(format!("GitHub API error posting comment (issue {}): Status {}, Body: {}", 
+            issue_number, response.status(), response.text().await.unwrap_or_default()))
+    }
+}
+
+// Placeholder function to add a label to a GitHub issue
+async fn add_github_label(state: &AppState, issue_number: u64, label: &str) -> Result<(), String> {
+    let url = format!("https://api.github.com/repos/{}/issues/{}/labels", state.github_repo, issue_number);
+    let headers = build_github_headers(&state.github_token)?;
+
+    #[derive(Serialize)]
+    struct LabelsPayload { labels: Vec<String> }
+    let payload = LabelsPayload { labels: vec![label.to_string()] };
+
+     let response = state.http_client.post(&url)
+        .headers(headers)
+        .json(&payload)
+        .send().await
+        .map_err(|e| format!("GitHub API request failed (POST label issue {}): {}", issue_number, e))?;
+
+    // GitHub returns 200 OK on success for adding labels
+    if response.status() == reqwest::StatusCode::OK {
+        Ok(())
+    } else {
+         Err(format!("GitHub API error adding label '{}' (issue {}): Status {}, Body: {}", 
+            label, issue_number, response.status(), response.text().await.unwrap_or_default()))
+    }
+}
+
+// Placeholder function to remove a label from a GitHub issue
+async fn remove_github_label(state: &AppState, issue_number: u64, label: &str) -> Result<(), String> {
+    // URL encode the label name in case it contains special characters
+    let encoded_label = urlencoding::encode(label);
+    let url = format!("https://api.github.com/repos/{}/issues/{}/labels/{}", state.github_repo, issue_number, encoded_label);
+    let headers = build_github_headers(&state.github_token)?;
+
+    let response = state.http_client.delete(&url)
+        .headers(headers)
+        .send().await
+        .map_err(|e| format!("GitHub API request failed (DELETE label issue {}): {}", issue_number, e))?;
+
+    // GitHub returns 200 OK or 204 No Content on success, 404 if label not found (which is fine)
+    if response.status().is_success() || response.status() == reqwest::StatusCode::NOT_FOUND {
+        Ok(())
+    } else {
+         Err(format!("GitHub API error removing label '{}' (issue {}): Status {}, Body: {}", 
+            label, issue_number, response.status(), response.text().await.unwrap_or_default()))
+    }
+}
+
+// Helper to build common GitHub API headers
+fn build_github_headers(token: &str) -> Result<reqwest::header::HeaderMap, String> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "Authorization", 
+        format!("token {}", token).parse().map_err(|e| format!("Invalid GitHub token format: {}", e))?
+    );
+    headers.insert(
+        "Accept", 
+        "application/vnd.github.v3+json".parse().map_err(|_| "Invalid Accept header".to_string())?
+    );
+    headers.insert(
+        "User-Agent", 
+        "LARS-Simulation-Scheduler".parse().map_err(|_| "Invalid User-Agent header".to_string())?
+    );
+    Ok(headers)
+}
+
+
+// --- Helper to handle cleanup after a simulation ---
+
+// Updated to return the final state of the simulation upon successful removal
+async fn cleanup_simulation(state: &AppState, sim_to_clean: ActiveSimulation, release_name: &str, namespace: &str, final_status: &str) -> Option<ActiveSimulation> {
+    let sim_id = sim_to_clean.simulation_id;
+    update_simulation_status(state, sim_id, "CleaningUp").await;
+    if let Err(e) = run_helm_uninstall(release_name, namespace).await {
+        tracing::error!(%sim_id, release=%release_name, "Helm cleanup failed during final cleanup: {}", e);
+    }
+
+    // Remove from active map first
+    let mut active_sims = state.active_simulations.lock().await;
+    let finished_sim_opt = active_sims.remove(&sim_id);
+    
+    // Broadcast updated active list regardless of whether removal succeeded
+    let current_active = active_sims.values().cloned().collect();
+    drop(active_sims); // Release lock before broadcasting and DB operations
+    let _ = state.event_sender.send(AppEvent::ActiveUpdated(current_active));
+
+    if let Some(mut finished_sim) = finished_sim_opt {
+        finished_sim.status = final_status.to_string();
+        let end_time = finished_sim.end_time.unwrap_or_else(|| chrono::Utc::now()); // Ensure end time is set
+        finished_sim.end_time = Some(end_time);
+
+        // Determine final actual cost
+        let final_actual_cost = finished_sim.usage_snapshots.last().map(|snap| 
+            ResourceCost { cpu_cores: snap.cpu_cores, memory_gb: snap.memory_gb, monetary_cost_eur: None }
+        );
+
+        // Update last_finished_simulation state (for UI)
+        let last_finished = LastFinishedSimulation {
+            simulation_id: finished_sim.simulation_id,
+            params: finished_sim.params.clone(),
+            predicted_cost: finished_sim.predicted_cost.clone(),
+            // Use final actual cost if available, otherwise predicted cost
+            actual_cost: final_actual_cost.clone().unwrap_or_else(|| finished_sim.predicted_cost.clone()),
+            finished_at: end_time,
+            duration_secs: finished_sim.params.duration_secs,
+        };
+        *state.last_finished_simulation.lock().await = Some(last_finished.clone());
+        let _ = state.event_sender.send(AppEvent::LastFinished(last_finished));
+        
+        // --- Database Updates ---
+        let db_pool = &state.db_pool;
+
+        // 1. Serialize config details to JSON
+        let config_details_json = match serde_json::to_string(&finished_sim) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::error!(%sim_id, "Failed to serialize simulation config to JSON: {}", e);
+                "{}".to_string() // Store empty JSON object on error
+            }
+        };
+
+        // 2. Insert into simulation_runs table
+        let insert_run_result = sqlx::query(
+            r#"
+            INSERT INTO simulation_runs (
+                simulation_id, request_id, issue_number, status, chart, node_count, duration_secs,
+                start_time, end_time, release_name, predicted_cpu_cores, predicted_memory_gb, 
+                actual_cpu_cores, actual_memory_gb, results_url, config_details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#
+        )
+        .bind(finished_sim.simulation_id.to_string()) // Store UUID as string
+        .bind(finished_sim.request_id.to_string())
+        .bind(finished_sim.issue_number.map(|i| i as i64)) // Use i64
+        .bind(&finished_sim.status)
+        .bind(&finished_sim.params.chart)
+        .bind(finished_sim.params.node_count as i64)
+        .bind(finished_sim.params.duration_secs as i64)
+        .bind(finished_sim.start_time)
+        .bind(end_time)
+        .bind(&finished_sim.release_name)
+        .bind(finished_sim.predicted_cost.cpu_cores as f64)
+        .bind(finished_sim.predicted_cost.memory_gb as f64)
+        .bind(final_actual_cost.as_ref().map(|c| c.cpu_cores as f64)) // Option<f64>
+        .bind(final_actual_cost.as_ref().map(|c| c.memory_gb as f64)) // Option<f64>
+        .bind::<Option<String>>(None) // Placeholder for results_url, update later
+        .bind(config_details_json)
+        .execute(db_pool)
+        .await;
+
+        if let Err(e) = insert_run_result {
+             tracing::error!(%sim_id, "Failed to insert record into simulation_runs table: {}", e);
+             // Continue anyway, but the history record will be missing
+        }
+
+        // 3. Update cost_history table *only* if simulation completed successfully
+        if finished_sim.status == "Completed" {
+            if let Some(actual_cost) = final_actual_cost {
+                 let update_cost_hist_result = sqlx::query(
+                    r#"
+                    INSERT INTO cost_history (chart, node_count, duration_secs, cpu_cores, memory_gb, observed_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(chart, node_count, duration_secs) DO UPDATE SET
+                        cpu_cores = excluded.cpu_cores,
+                        memory_gb = excluded.memory_gb,
+                        observed_at = excluded.observed_at
+                    "#
+                )
+                .bind(&finished_sim.params.chart)
+                .bind(finished_sim.params.node_count as i64)
+                .bind(finished_sim.params.duration_secs as i64)
+                .bind(actual_cost.cpu_cores as f64)
+                .bind(actual_cost.memory_gb as f64)
+                .bind(end_time)
+                .execute(db_pool)
+                .await;
+
+                if let Err(e) = update_cost_hist_result {
+                     tracing::warn!(%sim_id, "Failed to update cost_history table: {}", e);
+                }
+            } else {
+                 tracing::warn!(%sim_id, "Simulation completed but no final actual cost available to update cost_history.");
+            }
+        }
+
+        tracing::info!(%sim_id, status=%final_status, "Simulation finished, removed from active, DB updated.");
+        Some(finished_sim)
+
+    } else {
+        tracing::warn!(%sim_id, "Tried to finalize simulation but it wasn't in the active list.");
+        None
+    }
+}
+
+// Helper for cleanup when a simulation fails *before* running its duration
+// Updated signature to take ActiveSimulation object
+async fn cleanup_failed_simulation(state: &AppState, sim_to_clean: ActiveSimulation, release_name: &str, namespace: &str) {
+    // Final status should already be set (e.g., Failed (Helm), Failed (Rollout))
+    // Pass the current sim state to the main cleanup function
+    let _ = cleanup_simulation(state, sim_to_clean, release_name, namespace, "Failed").await; // Use a generic failed status if not already specific
+}
+
+// ... rest of the file ...
+
+// Handler to rerun a previous simulation
+#[debug_handler]
+async fn rerun_simulation_handler(
+    State(state): State<AppState>,
+    Path(simulation_id_str): Path<String>,
+) -> impl IntoResponse {
+    tracing::info!(%simulation_id_str, "Received request to rerun simulation");
+
+    // Validate UUID format (optional but good practice)
+    let simulation_id_to_rerun = match Uuid::parse_str(&simulation_id_str) {
+        Ok(uuid) => uuid,
+        Err(_) => {
+            tracing::warn!(%simulation_id_str, "Invalid UUID format for rerun request");
+            return (StatusCode::BAD_REQUEST, Json("Invalid simulation ID format")).into_response();
+        }
+    };
+
+    // 1. Fetch the historical run details from DB
+    let history_entry_result: Result<Option<SimulationRunHistoryEntry>, sqlx::Error> = 
+        sqlx::query_as("SELECT * FROM simulation_runs WHERE simulation_id = ?")
+        .bind(&simulation_id_str)
+        .fetch_optional(&state.db_pool)
+        .await;
+
+    let history_entry = match history_entry_result {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            tracing::warn!(%simulation_id_str, "Simulation ID not found in history for rerun");
+            return (StatusCode::NOT_FOUND, Json("Simulation ID not found in history")).into_response();
+        }
+        Err(e) => {
+            tracing::error!(%simulation_id_str, "Database error fetching history for rerun: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json("Database error")).into_response();
+        }
+    };
+
+    // 2. Deserialize the config_details JSON
+    // We expect config_details to contain a serialized ActiveSimulation
+    let original_sim_config: ActiveSimulation = match serde_json::from_str(&history_entry.config_details) {
+        Ok(config) => config,
+        Err(e) => {
+             tracing::error!(%simulation_id_str, "Failed to deserialize config_details for rerun: {}", e);
+             return (StatusCode::INTERNAL_SERVER_ERROR, Json("Failed to parse original simulation config")).into_response();
+        }
+    };
+
+    // 3. Create a new QueuedSimulation based on the original config
+    let new_request_id = Uuid::new_v4();
+    let params = original_sim_config.params; // Reuse original params
+
+    // Predict cost for the rerun (conditions might have changed)
+    let predicted_cost = match predict_cost(&state.db_pool, &params).await {
+        Ok(cost) => cost,
+        Err(e) => {
+             tracing::error!(%simulation_id_str, "Failed to predict cost for rerun: {}", e);
+             // Proceed with a default prediction? Or fail the request?
+             // Let's fail for now, as cost prediction is important.
+             return (StatusCode::INTERNAL_SERVER_ERROR, Json("Failed to predict cost for rerun")).into_response();
+        }
+    };
+
+    let new_queued_sim = QueuedSimulation {
+        request_id: new_request_id,
+        params,
+        predicted_cost,
+        issue_number: original_sim_config.issue_number, // Link to original issue if present
+        docker_image: original_sim_config.docker_image,
+        pubsub_topic: original_sim_config.pubsub_topic,
+        bootstrap_nodes: Some(original_sim_config.bootstrap_nodes), // Assuming ActiveSim has this field correctly
+        publisher_enabled: original_sim_config.publisher_enabled,
+        publisher_message_size: original_sim_config.publisher_message_size,
+        publisher_delay: original_sim_config.publisher_delay,
+        publisher_message_count: original_sim_config.publisher_message_count,
+        artificial_latency: original_sim_config.artificial_latency,
+        latency_ms: original_sim_config.latency_ms,
+        nodes_command: original_sim_config.nodes_command,
+        bootstrap_command: original_sim_config.bootstrap_command,
+        peer_number: original_sim_config.peer_number,
+        number_of_peers: original_sim_config.number_of_peers,
+        peers_to_connect: original_sim_config.peers_to_connect,
+        message_rate: original_sim_config.message_rate,
+        message_size: original_sim_config.message_size,
+        // Use parallel limit from original config if possible, else default
+        // Need to ensure ActiveSimulation stores this, or derive it somehow.
+        // For now, defaulting to 1. TODO: Persist/retrieve parallel_limit
+        parallel_limit: 1, 
+    };
+
+    // 4. Add to queue
+    state.queued_simulations.lock().await.push_back(new_queued_sim.clone());
+
+    // 5. Broadcast queue update
+    let current_queue: Vec<QueuedSimulation> = state.queued_simulations.lock().await.iter().cloned().collect();
+    let _ = state.event_sender.send(AppEvent::QueueUpdated(current_queue));
+
+    tracing::info!(%simulation_id_str, new_request_id=%new_request_id, "Successfully queued simulation for rerun");
+
+    // 6. Return success
+    #[derive(Serialize)]
+    struct RerunResponse { message: String, new_request_id: String }
+    (StatusCode::OK, Json(RerunResponse { 
+        message: "Simulation queued for rerun".to_string(),
+        new_request_id: new_request_id.to_string()
+    })).into_response()
+}
+
+
+// --- Main Application ---
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenv().ok();
-    // Initialize tracing (logging)
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "lars=debug,tower_http=debug,minijinja=warn".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    // ... (dotenv, tracing, config loading, db setup) ...
 
-    tracing::info!("Initializing LARS...");
+    // --- Initialize Application State ---
+    // ... (state initialization) ...
 
-    // Setup MiniJinja template environment
-    let templates_reloader = AutoReloader::new(|notifier| {
-        let mut env = Environment::new();
-        env.set_loader(path_loader("templates"));
-        notifier.watch_path("templates", true);
-        Ok(env)
-    });
+    // --- Start Background Tasks ---
+    // ... (k8s, github, scheduler, monitor tasks) ...
 
-    // --- Database Setup ---
-    let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    tracing::debug!("Using database URL: {}", db_url);
-    
-    // Check if database exists and create it if it doesn't
-    if !std::path::Path::new(&db_url).exists() {
-        tracing::info!("Database file does not exist, will be created by SqlitePool");
-    }
-    
-    // Connect to the database
-    tracing::debug!("Connecting to SQLite database");
-    let db_pool = SqlitePool::connect(&db_url).await.expect("Failed to connect to database");
-    
-    // Create tables if they don't exist
-    tracing::debug!("Setting up database tables");
-    let create_table_result = sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS cost_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chart TEXT NOT NULL,
-            node_count INTEGER NOT NULL,
-            duration_secs INTEGER NOT NULL,
-            cpu_cores REAL NOT NULL,
-            memory_gb REAL NOT NULL,
-            observed_at TEXT NOT NULL
-        )
-        "#
-    ).execute(&db_pool).await;
-    
-    match create_table_result {
-        Ok(_) => tracing::debug!("cost_history table created or already exists"),
-        Err(e) => tracing::error!("Failed to create cost_history table: {}", e),
-    }
-
-    // --- Initial State Setup ---
-    let (event_sender, _) = broadcast::channel::<AppEvent>(100);
-
-    let state = AppState {
-        templates: Arc::new(Mutex::new(templates_reloader)), // Now in scope
-        queued_simulations: Arc::new(Mutex::new(VecDeque::new())),
-        active_simulations: Arc::new(Mutex::new(HashMap::new())),
-        last_finished_simulation: Arc::new(Mutex::new(None)),
-        cluster_utilization: Arc::new(Mutex::new(ClusterUtilization::default())),
-        namespace_utilization: Arc::new(Mutex::new(NamespaceUtilization::default())),
-        db_pool, // Now in scope
-        event_sender: event_sender.clone(), 
-        scheduler_state: Arc::new(Mutex::new(SchedulerState::default())),
-        time_dilation: Arc::new(Mutex::new(1)), 
-        // Store predicted cost for runs awaiting start report
-        pending_simulations: Arc::new(Mutex::new(HashMap::new())), 
-    };
-
-    // --- Mock Scheduler Task (remains) ---
-    let scheduler_state_clone = state.clone();
-    tokio::spawn(async move {
-        let state = scheduler_state_clone; // Renamed for clarity
-        
-        // Scheduler loop - check queue and move to active status
-        loop {
-            let result = process_next_simulation_from_queue(&state).await;
-            match result {
-                Ok(true) => {
-                    // Successfully processed a simulation, continue immediately to process more
-                    tracing::debug!("Scheduler processed simulation from queue, checking for more...");
-                    continue;
-                }
-                Ok(false) => {
-                    // No simulations processed, wait for a bit
-                    tracing::debug!("Scheduler found no simulations to process");
-                }
-                Err(e) => {
-                    tracing::error!("Scheduler error processing simulation: {}", e);
-                }
-            }
-            // Wait before checking again
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
-    });
-
-    // --- Mock Monitoring Task (remains) ---
-    let monitor_state_clone = state.clone();
-    tokio::spawn(async move {
-        let state = monitor_state_clone; // Renamed for clarity
-        loop {
-            // Update overall cluster utilization
-            if let Err(e) = update_utilization_from_k8s(state.clone()).await {
-                 tracing::warn!("Failed to update utilization from k8s: {:?}", e);
-            }
-            
-            // Get active simulations and measure their actual resource usage
-            {
-                let active_guard = match state.active_simulations.try_lock() {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        tracing::warn!("Monitoring task couldn't acquire active simulations lock, skipping resource measurement");
-                        tokio::time::sleep(std::time::Duration::from_secs(25)).await;
-                        continue;
-                    }
-                };
-                
-                // Skip if no active simulations
-                if active_guard.is_empty() {
-                    drop(active_guard);
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    continue;
-                }
-                
-                let active_sim_count = active_guard.len();
-                tracing::debug!("Monitoring task measuring resource usage for {} active simulations", active_sim_count);
-                
-                // First just collect the data we need while holding the lock briefly
-                let sim_data: Vec<(Uuid, String, String)> = active_guard.iter()
-                    .map(|(id, sim)| (*id, sim.params.chart.clone(), sim.release_name.clone()))
-                    .collect();
-                drop(active_guard);
-                
-                // Keep track of whether any simulations were updated
-                let mut any_updated = false;
-                
-                // Measure each simulation's resource usage (outside the lock)
-                for (sim_id, _chart, release_name) in sim_data {
-                    // Skip mock simulations or those with invalid/placeholder release names
-                    if release_name.starts_with("mock-") || release_name.contains("mock") {
-                        tracing::debug!("Skipping resource measurement for mock simulation {}: release_name='{}'", sim_id, release_name);
-                        continue;
-                    }
-                    
-                    // Skip if release name doesn't look like a valid Kubernetes resource name
-                    if !is_valid_release_name(&release_name) {
-                        tracing::debug!("Skipping resource measurement for simulation {} with invalid release name: '{}'", sim_id, release_name);
-                        continue;
-                    }
-                    
-                    // Additional check: release name should be for a real deployment
-                    // Most real Kubernetes deployments will have nodes-X, statefulset-X, or deployment-X patterns
-                    if !release_name.contains("-nodes") && 
-                       !release_name.contains("-deployment") && 
-                       !release_name.contains("-statefulset") &&
-                       !release_name.contains("-pod") {
-                        // This is probably not a real deployment but we'll try anyway with a warning
-                        tracing::warn!("Release name '{}' doesn't follow expected naming pattern for deployments, measurement may fail", release_name);
-                    }
-                    
-                    // Use the stored release_name from the report_start request
-                    match fetch_simulation_usage("larstesting", &release_name).await {
-                        Ok(usage) => {
-                            // Now get the lock again to update just this simulation
-                            if let Ok(mut active_guard) = state.active_simulations.try_lock() {
-                                if let Some(sim) = active_guard.get_mut(&sim_id) {
-                                    // Update the simulation with actual usage
-                                    sim.actual_cost.cpu_cores = usage.cpu_cores;
-                                    sim.actual_cost.memory_gb = usage.memory_gb;
-                                    
-                                    // Add a new snapshot of resource usage
-                                    sim.usage_snapshots.push(ResourceSnapshot {
-                                        timestamp: chrono::Utc::now(),
-                                        cpu_cores: usage.cpu_cores,
-                                        memory_gb: usage.memory_gb,
-                                    });
-                                    sim.last_snapshot_time = chrono::Utc::now();
-                                    
-                                    // Calculate monetary cost based on actual usage
-                                    sim.monetary_cost_eur_actual = Some(calculate_monetary_cost(
-                                        &sim.actual_cost,
-                                        sim.params.duration_secs
-                                    ));
-                                    
-                                    any_updated = true;
-                                    tracing::info!(
-                                        %sim_id,
-                                        "Updated actual resource usage. CPU: {:.2} cores, Memory: {:.2} GB", 
-                                        usage.cpu_cores, usage.memory_gb
-                                    );
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            tracing::warn!("Failed to measure resource usage for simulation {}: {}", sim_id, e);
-                        }
-                    }
-                }
-                
-                // Broadcast an update if we modified any simulations
-                if any_updated {
-                    if let Ok(active_guard) = state.active_simulations.try_lock() {
-                        let active_sims = active_guard.values().cloned().collect::<Vec<ActiveSimulation>>();
-                        drop(active_guard);
-                        let _ = state.event_sender.send(AppEvent::ActiveUpdated(active_sims));
-                    }
-                }
-            }
-            
-            // Wait before checking again (every 30 seconds)
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        }
-    });
-
-    // --- Build Router AFTER State Initialization ---
-    let mut app = Router::new()
-        // Routes using handlers defined outside main
+    // --- Define Web Server Routes ---
+    let app = Router::new()
+        // Existing routes for UI, API, SSE
         .route("/",
             #[cfg(debug_assertions)]
-            axum::routing::get(root_handler_debug),
+            get(root_handler_debug),
             #[cfg(not(debug_assertions))]
-            axum::routing::get(root_handler_release)
+            get(root_handler_release)
         )
-        .route("/api/history", axum::routing::get(api_history_handler))
-        .route("/status-stream", axum::routing::get(sse_handler))
-        .route("/mock_submit", axum::routing::post(mock_submit_handler))
-        .route("/set_time_dilation", axum::routing::post(set_time_dilation_handler))
-        .route("/api/v1/request_run", axum::routing::post(request_run_handler))
-        .route("/api/v1/report_start", axum::routing::post(report_start_handler))
-        .route("/api/v1/report_complete", axum::routing::post(report_complete_handler))
-        .route("/measure_usage", axum::routing::post(measure_simulation_usage))
-        .nest_service("/static", ServeDir::new("static"))
         .route("/history",
             #[cfg(debug_assertions)]
-            axum::routing::get(history_handler_debug),
+            get(history_handler_debug),
             #[cfg(not(debug_assertions))]
-            axum::routing::get(history_handler_release)
+            get(history_handler_release)
         )
-        .with_state(state.clone())
+        .route("/status-stream", get(sse_handler))
+        .nest_service("/static", ServeDir::new("static"))
+        // Existing API routes
+        .route("/api/history", get(api_history_handler))
+        .route("/mock_submit", post(mock_submit_handler)) // If still used
+        .route("/set_time_dilation", post(set_time_dilation_handler)) // If still used
+        // External Integration API (kept for potential direct interaction)
+        .route("/api/v1/request_run", post(request_run_handler))
+        .route("/api/v1/report_start", post(report_start_handler))
+        .route("/api/v1/report_complete", post(report_complete_handler))
+        // Measurement endpoint (if used by monitoring)
+        // .route("/measure_usage", post(measure_simulation_usage))
+        // Rerun Endpoint (NEW)
+        .route("/api/rerun/:simulation_id", post(rerun_simulation_handler))
+        // Add other routes as needed
+        .with_state(AppState {
+            templates: Arc::new(Mutex::new(AutoReloader::new(|_| {
+                let mut env = minijinja::Environment::new();
+                env.set_loader(path_loader("templates"));
+                Ok(env)
+            }))),
+            queued_simulations: Arc::new(Mutex::new(VecDeque::new())),
+            active_simulations: Arc::new(Mutex::new(HashMap::new())),
+            last_finished_simulation: Arc::new(Mutex::new(None)),
+            cluster_utilization: Arc::new(Mutex::new(ClusterUtilization::default())),
+            namespace_utilization: Arc::new(Mutex::new(NamespaceUtilization::default())),
+            db_pool: SqlitePool::connect("sqlite::memory:").await.unwrap(), // Use a real DB path later
+            event_sender: broadcast::channel(100).0,
+            scheduler_state: Arc::new(Mutex::new(SchedulerState::default())),
+            time_dilation: Arc::new(Mutex::new(1)),
+            pending_simulations: Arc::new(Mutex::new(HashMap::new())),
+            github_token: "".to_string(), // Load from env/config
+            github_repo: "".to_string(), // Load from env/config
+            github_authorized_users: Vec::new(), // Load from env/config
+            http_client: reqwest::Client::new(),
+        })
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::default().include_headers(true)),
         );
 
-    // Add Live Reload Layer conditionally
-    #[cfg(debug_assertions)]
-    {
-        tracing::info!("Enabling live reload layer");
-        app = app.layer(LiveReloadLayer::new());
-    }
+    // Conditionally add Live Reload layer for debug builds
+    #[cfg(feature = "debug")]
+    let app = app.layer(LiveReloadLayer::new());
 
-    // Define the server address
+    // --- Run Server ---
     let addr = SocketAddr::from(([0, 0, 0, 0], 9930));
     tracing::info!("Listening on {}", addr);
-
-    // Run the server
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service())
-        .await?;
+    axum::serve(listener, app).await?;
 
     Ok(())
 }
 
-/// Check if a release name appears to be valid for Kubernetes
-/// 
-/// This doesn't need to be a perfect validation, just enough to filter out
-/// mock or placeholder names that would cause 422 errors in Prometheus
-fn is_valid_release_name(name: &str) -> bool {
-    // Must not be empty
-    if name.is_empty() {
-        return false;
-    }
-    
-    // Must not contain "mock" anywhere
-    if name.to_lowercase().contains("mock") {
-        return false;
-    }
-    
-    // Must be at least a few characters long
-    if name.len() < 3 {
-        return false;
-    }
+// ... (rest of the file: background tasks, helpers, etc.) ...
 
-    // Print the chart name/release name for debugging
-    tracing::debug!("Checking release name: {}", name);
+// Helper to update labels after analysis attempt
+async fn update_github_labels_post_analysis(state: &AppState, issue_number: u64, sim_id: Uuid, success: bool) {
+    let issue_str = format!("#{}", issue_number);
     
-    // Basic chart name check - must start with either "waku-" or "nimlibp2p-"
-    if !name.starts_with("waku-") && !name.starts_with("nimlibp2p-") {
-        tracing::debug!("Release name doesn't start with a known chart prefix: {}", name);
-        return false;
+    // 1. Remove "simulation-pending" label first
+    if let Err(e) = remove_github_label(state, issue_number, "simulation-pending").await {
+        tracing::warn!(%sim_id, issue = %issue_str, "Failed to remove 'simulation-pending' label (may not have existed): {}", e);
     }
     
-    // Simplify validation - just ensure we don't have characters that would break Prometheus queries
-    let has_risky_chars = name.contains("\\") || 
-                          name.contains("\"") || 
-                          name.contains("'");
+    // 2. Add the final status label
+    let final_label = if success { "simulation-done" } else { "simulation-failed" };
+    if let Err(e) = add_github_label(state, issue_number, final_label).await {
+        tracing::error!(%sim_id, issue = %issue_str, "Failed to add '{}' label: {}", final_label, e);
+    } else {
+        tracing::info!(%sim_id, issue = %issue_str, label=%final_label, "Added final status label.");
+    }
     
-    !has_risky_chars
+    // Optionally remove "needs-scheduling" if it's still present?
+    // if success {
+    //     if let Err(e) = remove_github_label(state, issue_number, "needs-scheduling").await {
+    //         tracing::warn!(%sim_id, issue = %issue_str, "Failed to remove 'needs-scheduling' label: {}", e);
+    //     }
+    // }
 }
+
+// --- Stubs for missing functions ---
+
+// Stub for predict_cost
+async fn predict_cost(db_pool: &SqlitePool, params: &SimulationParams) -> Result<ResourceCost, String> {
+    tracing::warn!("Using STUB for predict_cost");
+    // Basic fallback prediction
+    let default_cpu_per_node = if params.chart == "waku" { 0.1 } else { 0.08 };
+    let default_mem_per_node = if params.chart == "waku" { 0.05 } else { 0.04 };
+    Ok(ResourceCost {
+        cpu_cores: params.node_count as f32 * default_cpu_per_node,
+        memory_gb: params.node_count as f32 * default_mem_per_node,
+        monetary_cost_eur: None,
+    })
+}
+
+// Stub for update_simulation_status
+async fn update_simulation_status(state: &AppState, sim_id: Uuid, status: &str) {
+    tracing::info!(%sim_id, %status, "STUB: update_simulation_status called");
+    if let Some(sim) = state.active_simulations.lock().await.get_mut(&sim_id) {
+        sim.status = status.to_string();
+        // Broadcast update? Should probably happen here.
+    }
+}
+
+// Stub for generate_values_yaml
+fn generate_values_yaml(sim: &ActiveSimulation) -> Result<String, String> {
+    tracing::warn!(%sim.simulation_id, "Using STUB for generate_values_yaml");
+    Ok("key: value # Stub YAML".to_string())
+}
+
+// Stub for write_temp_values_file
+async fn write_temp_values_file(content: &str) -> Result<std::path::PathBuf, std::io::Error> {
+    use tokio::io::AsyncWriteExt;
+    tracing::warn!("Using STUB for write_temp_values_file");
+    let temp_dir = std::env::temp_dir().join("lars_values");
+    tokio::fs::create_dir_all(&temp_dir).await?;
+    let file_path = temp_dir.join(format!("values-{}.yaml", Uuid::new_v4())); // Unique name
+    let mut file = tokio::fs::File::create(&file_path).await?;
+    file.write_all(content.as_bytes()).await?;
+    Ok(file_path)
+}
+
+// Stub for run_helm_deploy
+async fn run_helm_deploy(sim: &ActiveSimulation, release_name: &str, namespace: &str, values_path: &std::path::Path) -> Result<(), String> {
+    tracing::warn!(%sim.simulation_id, %release_name, "Using STUB for run_helm_deploy");
+    // Simulate some delay
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    Ok(())
+}
+
+// Stub for run_kubectl_rollout
+async fn run_kubectl_rollout(statefulset_name: &str, namespace: &str) -> Result<(), String> {
+    tracing::warn!(%statefulset_name, "Using STUB for run_kubectl_rollout");
+    // Simulate some delay
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    Ok(())
+}
+
+// Stub for run_helm_uninstall
+async fn run_helm_uninstall(release_name: &str, namespace: &str) -> Result<(), String> {
+    tracing::warn!(%release_name, "Using STUB for run_helm_uninstall");
+    // Simulate some delay
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    Ok(())
+}
+// Stub for measure_simulation_usage (Needed if route is uncommented)
+/*
+async fn measure_simulation_usage(State(state): State<AppState>, Json(payload): Json<SomePayloadType>) -> impl IntoResponse {
+    tracing::warn!("Using STUB for measure_simulation_usage");
+    StatusCode::OK
+}
+*/
+// --- End Stubs ---
